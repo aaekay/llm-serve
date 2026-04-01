@@ -20,6 +20,8 @@ The default mock-safe code path exists to keep tests lightweight, but actual mod
 - Interactive requests are capped by `PROMPT_MAX_PARALLEL`, which defaults to `8`.
 - Batch uploads, metadata, and generated outputs are stored under `STORAGE_ROOT`.
 - Model downloads and Hugging Face cache files are stored under `MODEL_CACHE_DIR`, which defaults to the repo-local `data/models/`.
+- On startup, the service can run a self-test prompt such as a thousand-word poem after the default model loads. By default this runs in the background so the API becomes ready after model load, and `/healthz` reports `queued`, `running`, `passed`, or `failed` along with completion tokens, latency, and tokens-per-second.
+- Set `STARTUP_SELF_TEST_BLOCKING=true` if you want startup readiness to wait for that generation to finish and fail fast on a broken generation path.
 - `VLLM_GPU_AUTO_SELECT=true` makes the first vLLM model load inspect all host GPUs with `nvidia-smi`, choose the best `VLLM_GPU_COUNT` GPUs by free memory, and set `CUDA_VISIBLE_DEVICES` automatically.
 - `VLLM_GPU_MEMORY_UTILIZATION` is a preferred cap, not a fixed requirement. If the selected GPUs cannot safely support that value, the server derives a lower `gpu_memory_utilization` from current free memory, `VLLM_GPU_MEMORY_RESERVE_FRACTION`, and `VLLM_GPU_MEMORY_UTILIZATION_MIN`.
 - If you disable auto-selection, `CUDA_VISIBLE_DEVICES` is used directly and `VLLM_GPU_MEMORY_UTILIZATION` stays fixed.

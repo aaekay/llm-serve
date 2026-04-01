@@ -45,7 +45,12 @@ class TrackingBackend(ModelBackend):
 
 
 def test_runtime_manager_respects_parallel_limit(tmp_path):
-    settings = make_settings(tmp_path, PROMPT_MAX_PARALLEL=2, FOREGROUND_QUEUE_LIMIT=10)
+    settings = make_settings(
+        tmp_path,
+        PROMPT_MAX_PARALLEL=2,
+        FOREGROUND_QUEUE_LIMIT=10,
+        STARTUP_SELF_TEST_ENABLED="false",
+    )
     created = {}
 
     async def factory(model_id: str) -> ModelBackend:
@@ -73,7 +78,12 @@ def test_runtime_manager_respects_parallel_limit(tmp_path):
 
 
 def test_runtime_manager_rejects_when_foreground_queue_is_full(tmp_path):
-    settings = make_settings(tmp_path, PROMPT_MAX_PARALLEL=1, FOREGROUND_QUEUE_LIMIT=0)
+    settings = make_settings(
+        tmp_path,
+        PROMPT_MAX_PARALLEL=1,
+        FOREGROUND_QUEUE_LIMIT=0,
+        STARTUP_SELF_TEST_ENABLED="false",
+    )
 
     async def factory(model_id: str) -> ModelBackend:
         return TrackingBackend(model_id, delay=0.1)
@@ -97,3 +107,59 @@ def test_runtime_manager_rejects_when_foreground_queue_is_full(tmp_path):
         await runtime.shutdown()
 
     asyncio.run(scenario())
+
+
+def test_runtime_manager_startup_does_not_wait_for_background_self_test(tmp_path):
+    settings = make_settings(tmp_path, MOCK_RESPONSE_DELAY_SECONDS=0.2)
+
+    async def factory(model_id: str) -> ModelBackend:
+        return TrackingBackend(model_id, delay=0.2)
+
+    async def scenario():
+        runtime = RuntimeManager(settings, backend_factory=factory)
+        started = asyncio.get_running_loop().time()
+        await runtime.startup()
+        elapsed = asyncio.get_running_loop().time() - started
+        initial_status = runtime.health_snapshot()["startup_self_test"]["status"]
+        await asyncio.sleep(0.25)
+        final_status = runtime.health_snapshot()["startup_self_test"]["status"]
+        await runtime.shutdown()
+        return elapsed, initial_status, final_status
+
+    elapsed, initial_status, final_status = asyncio.run(scenario())
+    assert elapsed < 0.15
+    assert initial_status in {"queued", "running"}
+    assert final_status == "passed"
+
+
+def test_runtime_manager_background_self_test_does_not_consume_foreground_slots(tmp_path):
+    settings = make_settings(
+        tmp_path,
+        PROMPT_MAX_PARALLEL=1,
+        FOREGROUND_QUEUE_LIMIT=0,
+        MOCK_RESPONSE_DELAY_SECONDS=0.2,
+    )
+
+    async def factory(model_id: str) -> ModelBackend:
+        return TrackingBackend(model_id, delay=0.2)
+
+    async def scenario():
+        runtime = RuntimeManager(settings, backend_factory=factory)
+        await runtime.startup()
+        await asyncio.sleep(0.01)
+        initial_status = runtime.health_snapshot()["startup_self_test"]["status"]
+        request = InferenceRequest(
+            model_id="mock/default",
+            prompt="hello",
+            max_output_tokens=16,
+            temperature=0.2,
+            top_p=0.95,
+            stream=False,
+        )
+        result = await runtime.run_foreground(request)
+        await runtime.shutdown()
+        return initial_status, result.text
+
+    initial_status, text = asyncio.run(scenario())
+    assert initial_status in {"queued", "running"}
+    assert text == "ok"

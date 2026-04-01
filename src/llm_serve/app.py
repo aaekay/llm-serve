@@ -79,6 +79,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             "batch_queue_depth": snapshot["batch_queue_depth"],
             "switch_in_progress": snapshot["switch_in_progress"],
             "switch_target_model": snapshot["switch_target_model"],
+            "startup_self_test": snapshot["startup_self_test"],
         }
 
     @app.get("/v1/models")

@@ -18,6 +18,12 @@ def test_healthz_and_openai_chat_completion(tmp_path):
         assert health.status_code == 200
         assert health.json()["loaded"] is True
         assert health.json()["model_id"] == "mock/default"
+        assert health.json()["startup_self_test"]["status"] in {"queued", "running", "passed"}
+        startup_self_test = _wait_for_startup_self_test(client, {"passed"})
+        assert startup_self_test["prompt"] == "Write a thousand word poem about sunrise."
+        assert startup_self_test["completion_tokens"] is not None
+        assert startup_self_test["tokens_per_second"] is not None
+        assert startup_self_test["tokens_per_second"] > 0
 
         response = client.post(
             "/v1/chat/completions",
@@ -137,6 +143,26 @@ def test_batch_file_upload_and_processing(tmp_path):
     assert "req-1" in output_content.text
 
 
+def test_healthz_reports_disabled_startup_self_test(tmp_path):
+    settings = make_settings(tmp_path, STARTUP_SELF_TEST_ENABLED="false")
+
+    with TestClient(create_app(settings)) as client:
+        health = client.get("/healthz")
+
+    assert health.status_code == 200
+    assert health.json()["startup_self_test"]["status"] == "disabled"
+
+
+def test_healthz_reports_background_startup_self_test_progress(tmp_path):
+    settings = make_settings(tmp_path, MOCK_RESPONSE_DELAY_SECONDS="1.0")
+
+    with TestClient(create_app(settings)) as client:
+        health = client.get("/healthz")
+
+    assert health.status_code == 200
+    assert health.json()["startup_self_test"]["status"] in {"queued", "running"}
+
+
 def _wait_for_batch(client: TestClient, batch_id: str):
     deadline = time.time() + 3.0
     last_payload = None
@@ -148,3 +174,16 @@ def _wait_for_batch(client: TestClient, batch_id: str):
             return last_payload
         time.sleep(0.05)
     raise AssertionError("Timed out waiting for batch completion: %s" % last_payload)
+
+
+def _wait_for_startup_self_test(client: TestClient, expected_statuses: set[str]):
+    deadline = time.time() + 3.0
+    last_payload = None
+    while time.time() < deadline:
+        response = client.get("/healthz")
+        response.raise_for_status()
+        last_payload = response.json()["startup_self_test"]
+        if last_payload["status"] in expected_statuses:
+            return last_payload
+        time.sleep(0.05)
+    raise AssertionError("Timed out waiting for startup self-test status: %s" % last_payload)

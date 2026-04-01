@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import AsyncIterator, Awaitable, Callable, Dict, List, Optional
 
 from llm_serve.config import Settings
@@ -11,7 +14,7 @@ from llm_serve.errors import (
     GatewayTimeoutError,
     TooManyRequestsError,
 )
-from llm_serve.types import InferenceRequest, InferenceResult, LoadStatus
+from llm_serve.types import InferenceRequest, InferenceResult, LoadStatus, StartupSelfTestResult
 
 from .base import ModelBackend
 from .mock import MockModelBackend
@@ -19,6 +22,7 @@ from .vllm_backend import VLLMModelBackend
 
 
 BackendFactory = Callable[[str], Awaitable[ModelBackend]]
+logger = logging.getLogger(__name__)
 
 
 class RuntimeManager:
@@ -35,16 +39,28 @@ class RuntimeManager:
         self._switch_task: Optional["asyncio.Task[None]"] = None
         self._switch_target_model: Optional[str] = None
         self._last_switch_error: Optional[str] = None
+        self._startup_self_test = StartupSelfTestResult(status="pending")
+        self._startup_self_test_task: Optional["asyncio.Task[None]"] = None
         self._foreground_pending = 0
         self._batch_pending = 0
         self._foreground_semaphore = asyncio.Semaphore(settings.prompt_max_parallel)
         self._batch_semaphore = asyncio.Semaphore(settings.batch_max_parallel)
 
     async def startup(self) -> None:
-        if self.settings.startup_load_default_model:
-            await self.ensure_loaded(self.settings.default_model_id)
+        if not self.settings.startup_load_default_model:
+            self._startup_self_test = StartupSelfTestResult(status="skipped")
+            return
+
+        await self.ensure_loaded(self.settings.default_model_id)
+        await self._start_startup_self_test()
 
     async def shutdown(self) -> None:
+        if self._startup_self_test_task and not self._startup_self_test_task.done():
+            self._startup_self_test_task.cancel()
+            try:
+                await self._startup_self_test_task
+            except asyncio.CancelledError:
+                pass
         if self._switch_task and not self._switch_task.done():
             self._switch_task.cancel()
             try:
@@ -183,6 +199,7 @@ class RuntimeManager:
             "switch_in_progress": self.switch_in_progress,
             "switch_target_model": self._switch_target_model,
             "last_switch_error": self._last_switch_error,
+            "startup_self_test": self._serialize_startup_self_test(),
         }
 
     async def _run_request(
@@ -207,12 +224,7 @@ class RuntimeManager:
         try:
             if wait_for_model:
                 await self.ensure_loaded(request.model_id)
-            async with self._backend_usage():
-                backend = self._require_active_backend(request.model_id)
-                return await asyncio.wait_for(
-                    backend.generate(request),
-                    timeout=self.settings.request_timeout_seconds,
-                )
+            return await self._generate_with_active_backend(request)
         except asyncio.TimeoutError as exc:
             raise GatewayTimeoutError("Inference request timed out") from exc
         finally:
@@ -281,3 +293,132 @@ class RuntimeManager:
                 self._active_usages -= 1
                 if self._active_usages == 0:
                     self._usage_idle.set()
+
+    async def _run_startup_self_test(self) -> None:
+        prompt = self.settings.startup_self_test_prompt.strip()
+        if not self.settings.startup_self_test_enabled:
+            self._startup_self_test = StartupSelfTestResult(status="disabled", prompt=prompt or None)
+            return
+        if not prompt:
+            self._startup_self_test = StartupSelfTestResult(status="skipped")
+            return
+
+        started_at = datetime.now(timezone.utc)
+        self._startup_self_test = StartupSelfTestResult(
+            status="running",
+            prompt=prompt,
+            model_id=self.settings.default_model_id,
+            started_at=started_at.isoformat(),
+        )
+        request = InferenceRequest(
+            model_id=self.settings.default_model_id,
+            prompt=prompt,
+            max_output_tokens=self.settings.startup_self_test_max_output_tokens,
+            temperature=self.settings.default_temperature,
+            top_p=self.settings.default_top_p,
+            stream=False,
+        )
+        started = time.perf_counter()
+        try:
+            result = await self._generate_with_active_backend(request)
+        except Exception as exc:
+            completed_at = datetime.now(timezone.utc)
+            self._startup_self_test = StartupSelfTestResult(
+                status="failed",
+                prompt=prompt,
+                model_id=self.settings.default_model_id,
+                started_at=started_at.isoformat(),
+                completed_at=completed_at.isoformat(),
+                error=str(exc),
+            )
+            logger.exception("Startup self-test failed for model '%s'", self.settings.default_model_id)
+            raise
+
+        latency_seconds = max(time.perf_counter() - started, 1e-9)
+        completed_at = datetime.now(timezone.utc)
+        tokens_per_second = result.completion_tokens / latency_seconds
+        self._startup_self_test = StartupSelfTestResult(
+            status="passed",
+            prompt=prompt,
+            model_id=self.settings.default_model_id,
+            started_at=started_at.isoformat(),
+            completed_at=completed_at.isoformat(),
+            latency_seconds=latency_seconds,
+            completion_tokens=result.completion_tokens,
+            tokens_per_second=tokens_per_second,
+        )
+        logger.info(
+            "Startup self-test passed for model '%s': completion_tokens=%s latency=%.3fs tokens_per_second=%.2f",
+            self.settings.default_model_id,
+            result.completion_tokens,
+            latency_seconds,
+            tokens_per_second,
+        )
+
+    async def _start_startup_self_test(self) -> None:
+        prompt = self.settings.startup_self_test_prompt.strip()
+        if not self.settings.startup_self_test_enabled:
+            self._startup_self_test = StartupSelfTestResult(status="disabled", prompt=prompt or None)
+            return
+        if not prompt:
+            self._startup_self_test = StartupSelfTestResult(status="skipped")
+            return
+        if self.settings.startup_self_test_blocking:
+            await self._run_startup_self_test()
+            return
+
+        self._startup_self_test = StartupSelfTestResult(
+            status="queued",
+            prompt=prompt,
+            model_id=self.settings.default_model_id,
+        )
+        self._startup_self_test_task = asyncio.create_task(self._run_startup_self_test_background())
+        self._startup_self_test_task.add_done_callback(self._clear_startup_self_test_task)
+
+    async def _run_startup_self_test_background(self) -> None:
+        try:
+            await self._run_startup_self_test()
+        except asyncio.CancelledError:
+            if self._startup_self_test.status in {"queued", "running"}:
+                self._startup_self_test = StartupSelfTestResult(
+                    status="cancelled",
+                    prompt=self._startup_self_test.prompt,
+                    model_id=self._startup_self_test.model_id,
+                    started_at=self._startup_self_test.started_at,
+                )
+            raise
+        except Exception:
+            return
+
+    async def _generate_with_active_backend(self, request: InferenceRequest) -> InferenceResult:
+        async with self._backend_usage():
+            backend = self._require_active_backend(request.model_id)
+            return await asyncio.wait_for(
+                backend.generate(request),
+                timeout=self.settings.request_timeout_seconds,
+            )
+
+    def _clear_startup_self_test_task(self, task: "asyncio.Task[None]") -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+        finally:
+            if self._startup_self_test_task is task:
+                self._startup_self_test_task = None
+
+    def _serialize_startup_self_test(self) -> Dict[str, object]:
+        snapshot = {
+            "status": self._startup_self_test.status,
+            "prompt": self._startup_self_test.prompt,
+            "model_id": self._startup_self_test.model_id,
+            "started_at": self._startup_self_test.started_at,
+            "completed_at": self._startup_self_test.completed_at,
+            "latency_seconds": self._startup_self_test.latency_seconds,
+            "completion_tokens": self._startup_self_test.completion_tokens,
+            "tokens_per_second": self._startup_self_test.tokens_per_second,
+            "error": self._startup_self_test.error,
+        }
+        return snapshot

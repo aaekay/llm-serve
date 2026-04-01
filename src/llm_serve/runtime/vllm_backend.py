@@ -57,14 +57,32 @@ class VLLMModelBackend(ModelBackend):
             shutdown_background_loop()
 
     async def generate(self, request: InferenceRequest) -> InferenceResult:
+        engine = await self._ensure_engine()
+        sampling_params = self._sampling_params_cls(
+            max_tokens=request.max_output_tokens,
+            temperature=request.temperature,
+            top_p=request.top_p,
+        )
+        request_id = uuid.uuid4().hex
         final_text = ""
-        async for delta in self.generate_stream(request):
-            final_text += delta
+        completion_tokens = 0
+        try:
+            async for output in engine.generate(request.prompt, sampling_params, request_id):
+                if not output.outputs:
+                    continue
+                final_output = output.outputs[0]
+                final_text = final_output.text
+                token_ids = getattr(final_output, "token_ids", None)
+                if token_ids is not None:
+                    completion_tokens = len(token_ids)
+        except Exception as exc:  # pragma: no cover - depends on runtime installation
+            raise UpstreamRuntimeError("vLLM generation failed: %s" % exc) from exc
+
         return InferenceResult(
             model_id=self.model_id,
             text=final_text,
             prompt_tokens=estimate_text_tokens(request.prompt),
-            completion_tokens=estimate_text_tokens(final_text),
+            completion_tokens=completion_tokens or estimate_text_tokens(final_text),
             reasoning=None,
         )
 

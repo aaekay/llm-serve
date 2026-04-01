@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import sys
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional, Protocol, TextIO
 
 from llm_serve.errors import BadRequestError
 from llm_serve.prompting import render_messages_to_prompt
@@ -15,13 +18,70 @@ from llm_serve.types import InferenceRequest
 
 from .runtime.manager import RuntimeManager
 
+try:
+    from tqdm import tqdm
+except ImportError:  # pragma: no cover - degraded fallback if dependencies were not refreshed yet.
+    tqdm = None
+
+
+logger = logging.getLogger(__name__)
+
+
+class _ProgressHandle(Protocol):
+    def update(self, count: int = 1) -> None:
+        ...
+
+    def close(self) -> None:
+        ...
+
+
+ProgressFactory = Callable[[str, int, int], _ProgressHandle]
+
+
+@dataclass
+class _BatchProgressState:
+    handle: _ProgressHandle
+    position: int
+
+
+def _supports_live_progress(stream: TextIO) -> bool:
+    if tqdm is None:
+        return False
+    return bool(getattr(stream, "isatty", lambda: False)())
+
+
+def _create_tqdm_progress(batch_id: str, total: int, position: int, stream: TextIO) -> _ProgressHandle:
+    if tqdm is None:
+        raise RuntimeError("tqdm is unavailable")
+    return tqdm(
+        total=total,
+        desc=batch_id,
+        position=position,
+        leave=False,
+        dynamic_ncols=True,
+        unit="item",
+        file=stream,
+    )
+
 
 class BatchManager:
-    def __init__(self, storage: StorageManager, runtime: RuntimeManager) -> None:
+    def __init__(
+        self,
+        storage: StorageManager,
+        runtime: RuntimeManager,
+        progress_factory: Optional[ProgressFactory] = None,
+        progress_enabled: Optional[bool] = None,
+        progress_stream: TextIO = sys.stderr,
+    ) -> None:
         self.storage = storage
         self.runtime = runtime
         self._tasks: Dict[str, "asyncio.Task[None]"] = {}
         self._locks: Dict[str, asyncio.Lock] = {}
+        self._progress_enabled = _supports_live_progress(progress_stream) if progress_enabled is None else progress_enabled
+        self._progress_factory = progress_factory or (
+            lambda batch_id, total, position: _create_tqdm_progress(batch_id, total, position, progress_stream)
+        )
+        self._progress: Dict[str, _BatchProgressState] = {}
 
     async def startup(self) -> None:
         for batch in self.storage.list_batches():
@@ -32,6 +92,7 @@ class BatchManager:
                 batch.completed_at = utc_timestamp()
                 batch.error = {"message": "Batch interrupted by process restart"}
                 self.storage.save_batch(batch)
+                logger.warning("Batch %s marked failed during startup recovery after process restart", batch.id)
 
     async def shutdown(self) -> None:
         for task in list(self._tasks.values()):
@@ -90,6 +151,7 @@ class BatchManager:
         batch.status = "in_progress"
         batch.in_progress_at = utc_timestamp()
         self.storage.save_batch(batch)
+        self._start_progress(batch.id, batch.request_counts.total)
 
         tasks = []
         for line in raw_lines:
@@ -114,6 +176,11 @@ class BatchManager:
             batch.completed_at = utc_timestamp()
             self.storage.save_batch(batch)
             raise
+        finally:
+            final_batch = self.storage.get_batch(batch_id)
+            self._finish_progress(final_batch)
+            self._locks.pop(batch_id, None)
+            self._tasks.pop(batch_id, None)
 
     async def _process_line(self, batch_id: str, raw_line: str) -> None:
         batch = self.storage.get_batch(batch_id)
@@ -177,6 +244,7 @@ class BatchManager:
                 batch = self.storage.get_batch(batch_id)
                 batch.request_counts.completed += 1
                 self.storage.save_batch(batch)
+                self._advance_progress(batch_id)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -191,6 +259,52 @@ class BatchManager:
                 self.storage.append_file_content(batch.error_file_id, error_line)
                 batch.request_counts.failed += 1
                 self.storage.save_batch(batch)
+                self._advance_progress(batch_id)
+
+    def _start_progress(self, batch_id: str, total: int) -> None:
+        logger.info("Batch %s started with %s items", batch_id, total)
+        if not self._progress_enabled:
+            return
+
+        position = self._next_progress_position()
+        try:
+            handle = self._progress_factory(batch_id, total, position)
+        except Exception:
+            logger.exception("Failed to create live progress for batch %s", batch_id)
+            return
+        self._progress[batch_id] = _BatchProgressState(handle=handle, position=position)
+
+    def _advance_progress(self, batch_id: str) -> None:
+        state = self._progress.get(batch_id)
+        if state is None:
+            return
+        try:
+            state.handle.update(1)
+        except Exception:
+            logger.exception("Failed to update live progress for batch %s", batch_id)
+
+    def _finish_progress(self, batch: BatchRecord) -> None:
+        state = self._progress.pop(batch.id, None)
+        if state is not None:
+            try:
+                state.handle.close()
+            except Exception:
+                logger.exception("Failed to close live progress for batch %s", batch.id)
+        logger.info(
+            "Batch %s finished status=%s completed=%s failed=%s total=%s",
+            batch.id,
+            batch.status,
+            batch.request_counts.completed,
+            batch.request_counts.failed,
+            batch.request_counts.total,
+        )
+
+    def _next_progress_position(self) -> int:
+        used_positions = {state.position for state in self._progress.values()}
+        position = 0
+        while position in used_positions:
+            position += 1
+        return position
 
 
 def _extract_custom_id(raw_line: str) -> Optional[str]:

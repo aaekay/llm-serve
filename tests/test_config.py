@@ -13,6 +13,7 @@ def test_settings_loads_csv_and_boolean_fields(tmp_path):
             "MODEL_ALLOWLIST": "mock/default,mock/reasoning",
             "REASONING_MODEL_ALLOWLIST": "mock/reasoning",
             "STARTUP_LOAD_DEFAULT_MODEL": "false",
+            "STARTUP_SELF_TEST_BLOCKING": "true",
             "VLLM_TRUST_REMOTE_CODE": "true",
             "VLLM_GPU_AUTO_SELECT": "false",
         },
@@ -21,6 +22,7 @@ def test_settings_loads_csv_and_boolean_fields(tmp_path):
     assert settings.model_allowlist == ["mock/default", "mock/reasoning"]
     assert settings.reasoning_model_allowlist == ["mock/reasoning"]
     assert settings.startup_load_default_model is False
+    assert settings.startup_self_test_blocking is True
     assert settings.vllm_trust_remote_code is True
     assert settings.vllm_gpu_auto_select is False
 
@@ -32,6 +34,20 @@ def test_settings_rejects_invalid_default_model(tmp_path):
             environ={
                 "DEFAULT_MODEL_ID": "missing/model",
                 "MODEL_ALLOWLIST": "mock/default",
+            },
+        )
+
+
+def test_settings_reject_startup_self_test_tokens_above_max_output_tokens(tmp_path):
+    with pytest.raises(ValueError):
+        Settings.load(
+            base_dir=tmp_path,
+            environ={
+                "DEFAULT_MODEL_ID": "mock/default",
+                "MODEL_ALLOWLIST": "mock/default,mock/reasoning",
+                "REASONING_MODEL_ALLOWLIST": "mock/reasoning",
+                "MAX_OUTPUT_TOKENS": "128",
+                "STARTUP_SELF_TEST_MAX_OUTPUT_TOKENS": "256",
             },
         )
 

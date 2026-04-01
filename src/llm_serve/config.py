@@ -70,6 +70,10 @@ class Settings:
     request_timeout_seconds: float
     switch_timeout_seconds: float
     startup_load_default_model: bool
+    startup_self_test_enabled: bool
+    startup_self_test_blocking: bool
+    startup_self_test_prompt: str
+    startup_self_test_max_output_tokens: int
     vllm_dtype: str
     vllm_tokenizer_mode: str
     vllm_trust_remote_code: bool
@@ -121,6 +125,24 @@ class Settings:
             startup_load_default_model=_parse_bool(
                 env_source.get("STARTUP_LOAD_DEFAULT_MODEL", "true"),
                 "STARTUP_LOAD_DEFAULT_MODEL",
+            ),
+            startup_self_test_enabled=_parse_bool(
+                env_source.get("STARTUP_SELF_TEST_ENABLED", "true"),
+                "STARTUP_SELF_TEST_ENABLED",
+            ),
+            startup_self_test_blocking=_parse_bool(
+                env_source.get("STARTUP_SELF_TEST_BLOCKING", "false"),
+                "STARTUP_SELF_TEST_BLOCKING",
+            ),
+            startup_self_test_prompt=env_source.get(
+                "STARTUP_SELF_TEST_PROMPT",
+                "Write a thousand word poem about dawn breaking over mountains.",
+            ),
+            startup_self_test_max_output_tokens=int(
+                env_source.get(
+                    "STARTUP_SELF_TEST_MAX_OUTPUT_TOKENS",
+                    env_source.get("MAX_OUTPUT_TOKENS", "1024"),
+                )
             ),
             vllm_dtype=env_source.get("VLLM_DTYPE", "auto"),
             vllm_tokenizer_mode=env_source.get("VLLM_TOKENIZER_MODE", "auto"),
@@ -179,6 +201,10 @@ class Settings:
             raise ValueError("MAX_INPUT_TOKENS must be at least 1")
         if self.max_output_tokens < 1:
             raise ValueError("MAX_OUTPUT_TOKENS must be at least 1")
+        if self.startup_self_test_max_output_tokens < 1:
+            raise ValueError("STARTUP_SELF_TEST_MAX_OUTPUT_TOKENS must be at least 1")
+        if self.startup_self_test_max_output_tokens > self.max_output_tokens:
+            raise ValueError("STARTUP_SELF_TEST_MAX_OUTPUT_TOKENS cannot exceed MAX_OUTPUT_TOKENS")
         if self.foreground_queue_limit < 0:
             raise ValueError("FOREGROUND_QUEUE_LIMIT must be non-negative")
         if self.batch_queue_limit < 0:

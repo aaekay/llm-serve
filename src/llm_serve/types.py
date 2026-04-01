@@ -39,3 +39,16 @@ class LoadStatus:
     @property
     def ready(self) -> bool:
         return self.state == "ready"
+
+
+@dataclass
+class StartupSelfTestResult:
+    status: str
+    prompt: Optional[str] = None
+    model_id: Optional[str] = None
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    latency_seconds: Optional[float] = None
+    completion_tokens: Optional[int] = None
+    tokens_per_second: Optional[float] = None
+    error: Optional[str] = None

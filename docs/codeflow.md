@@ -20,6 +20,14 @@
 - Before vLLM is initialized, the backend creates that directory and exports `HF_HOME`, `HUGGINGFACE_HUB_CACHE`, and `TRANSFORMERS_CACHE` under it.
 - As a result, model weights and Hugging Face cache artifacts stay inside the repo-local cache tree unless the config is changed.
 
+## Startup Self-Test
+
+- After the default model is loaded, the runtime can run a configured startup prompt to verify real generation.
+- The default prompt is a thousand-word poem request so generation health is tested with a non-trivial output.
+- By default the self-test is launched in the background, so FastAPI startup completes after model load and `/healthz` reports `queued`, `running`, `passed`, or `failed`.
+- The runtime records completion tokens, latency, and tokens-per-second and exposes them via `/healthz`.
+- When `STARTUP_SELF_TEST_BLOCKING=true`, startup instead waits for the self-test to finish and fails immediately if generation fails.
+
 ## Interactive Request Flow
 
 1. FastAPI receives either `/v1/*` or `/api/*` input and validates it with the request schemas.
