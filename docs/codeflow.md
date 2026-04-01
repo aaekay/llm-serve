@@ -7,10 +7,12 @@
 
 ## GPU Configuration
 
-- `CUDA_VISIBLE_DEVICES` limits which physical GPUs the service can see.
-- `VLLM_GPU_COUNT` sets `tensor_parallel_size` for vLLM, so one model can be spread across multiple visible GPUs.
-- Validation rejects `VLLM_GPU_COUNT` values larger than the number of configured visible devices.
-- Apply these settings before starting the server; they are startup/runtime initialization settings, not request-level controls.
+- `VLLM_GPU_AUTO_SELECT=true` makes the first vLLM model load inspect all host GPUs with `nvidia-smi`.
+- The backend ranks GPUs by current free memory, chooses the best `VLLM_GPU_COUNT` GPUs, and exports `CUDA_VISIBLE_DEVICES` for the vLLM process.
+- `VLLM_GPU_MEMORY_UTILIZATION` is treated as the preferred cap. If the chosen GPUs do not have enough free memory for that cap, the backend derives a lower safe utilization using `VLLM_GPU_MEMORY_RESERVE_FRACTION`.
+- If the derived utilization would fall below `VLLM_GPU_MEMORY_UTILIZATION_MIN`, startup fails with an insufficient-memory error instead of overcommitting.
+- When `VLLM_GPU_AUTO_SELECT=false`, the backend uses the configured `CUDA_VISIBLE_DEVICES` directly and keeps `VLLM_GPU_MEMORY_UTILIZATION` fixed.
+- `VLLM_GPU_COUNT` still sets vLLM `tensor_parallel_size`, so model compatibility constraints still apply.
 
 ## Model Cache
 
@@ -38,7 +40,8 @@ Relevant files:
 1. The active model is tracked by the runtime manager.
 2. A request or `/api/pull` against another allowlisted model triggers a background switch task.
 3. The switch waits for in-flight backend usage to drain, starts the new backend, swaps the active model, and shuts down the old backend.
-4. During the switch, requests for the target model receive `202`; conflicting switch requests receive `409`.
+4. During the first backend load only, adaptive GPU selection may inspect host GPUs and derive a safe vLLM memory-utilization ratio before the engine starts.
+5. During the switch, requests for the target model receive `202`; conflicting switch requests receive `409`.
 
 ## Batch Flow
 

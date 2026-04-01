@@ -20,4 +20,7 @@ The default mock-safe code path exists to keep tests lightweight, but actual mod
 - Interactive requests are capped by `PROMPT_MAX_PARALLEL`, which defaults to `8`.
 - Batch uploads, metadata, and generated outputs are stored under `STORAGE_ROOT`.
 - Model downloads and Hugging Face cache files are stored under `MODEL_CACHE_DIR`, which defaults to the repo-local `data/models/`.
-- Use `CUDA_VISIBLE_DEVICES` to choose which GPUs the process may see, and `VLLM_GPU_COUNT` to set how many of those visible GPUs vLLM should shard the model across.
+- `VLLM_GPU_AUTO_SELECT=true` makes the first vLLM model load inspect all host GPUs with `nvidia-smi`, choose the best `VLLM_GPU_COUNT` GPUs by free memory, and set `CUDA_VISIBLE_DEVICES` automatically.
+- `VLLM_GPU_MEMORY_UTILIZATION` is a preferred cap, not a fixed requirement. If the selected GPUs cannot safely support that value, the server derives a lower `gpu_memory_utilization` from current free memory, `VLLM_GPU_MEMORY_RESERVE_FRACTION`, and `VLLM_GPU_MEMORY_UTILIZATION_MIN`.
+- If you disable auto-selection, `CUDA_VISIBLE_DEVICES` is used directly and `VLLM_GPU_MEMORY_UTILIZATION` stays fixed.
+- `VLLM_GPU_COUNT` still maps to vLLM `tensor_parallel_size`. It must be compatible with the model; for example, a setting of `3` can fail on models whose tensor-parallel dimensions are not divisible by `3`.

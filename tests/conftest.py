@@ -30,7 +30,10 @@ def make_settings(tmp_path: Path, **overrides: Any) -> Settings:
         "VLLM_DTYPE": "auto",
         "VLLM_TOKENIZER_MODE": "auto",
         "VLLM_TRUST_REMOTE_CODE": "false",
+        "VLLM_GPU_AUTO_SELECT": "false",
         "VLLM_GPU_MEMORY_UTILIZATION": "0.9",
+        "VLLM_GPU_MEMORY_UTILIZATION_MIN": "0.5",
+        "VLLM_GPU_MEMORY_RESERVE_FRACTION": "0.05",
         "MOCK_RESPONSE_DELAY_SECONDS": "0.0",
     }
     for key, value in overrides.items():

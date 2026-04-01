@@ -258,7 +258,11 @@ class RuntimeManager:
     async def _default_factory(self, model_id: str) -> ModelBackend:
         if self.settings.inference_backend == "mock":
             return MockModelBackend(model_id, self.settings)
-        return VLLMModelBackend(model_id, self.settings)
+        return VLLMModelBackend(
+            model_id,
+            self.settings,
+            enable_adaptive_gpu_selection=self._active_backend is None,
+        )
 
     def _require_active_backend(self, model_id: str) -> ModelBackend:
         if self._active_backend is None or self._active_model_id != model_id:

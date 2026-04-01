@@ -73,9 +73,12 @@ class Settings:
     vllm_dtype: str
     vllm_tokenizer_mode: str
     vllm_trust_remote_code: bool
+    vllm_gpu_auto_select: bool
     cuda_visible_devices: Optional[str]
     vllm_gpu_count: int
     vllm_gpu_memory_utilization: float
+    vllm_gpu_memory_utilization_min: float
+    vllm_gpu_memory_reserve_fraction: float
     mock_response_delay_seconds: float
 
     @classmethod
@@ -125,9 +128,19 @@ class Settings:
                 env_source.get("VLLM_TRUST_REMOTE_CODE", "false"),
                 "VLLM_TRUST_REMOTE_CODE",
             ),
+            vllm_gpu_auto_select=_parse_bool(
+                env_source.get("VLLM_GPU_AUTO_SELECT", "true"),
+                "VLLM_GPU_AUTO_SELECT",
+            ),
             cuda_visible_devices=_optional_str(env_source.get("CUDA_VISIBLE_DEVICES")),
             vllm_gpu_count=int(env_source.get("VLLM_GPU_COUNT", "1")),
             vllm_gpu_memory_utilization=float(env_source.get("VLLM_GPU_MEMORY_UTILIZATION", "0.9")),
+            vllm_gpu_memory_utilization_min=float(
+                env_source.get("VLLM_GPU_MEMORY_UTILIZATION_MIN", "0.5")
+            ),
+            vllm_gpu_memory_reserve_fraction=float(
+                env_source.get("VLLM_GPU_MEMORY_RESERVE_FRACTION", "0.05")
+            ),
             mock_response_delay_seconds=float(env_source.get("MOCK_RESPONSE_DELAY_SECONDS", "0.0")),
         )
         settings.validate()
@@ -174,8 +187,16 @@ class Settings:
             raise ValueError("INFERENCE_BACKEND must be 'mock' or 'vllm'")
         if self.vllm_gpu_count < 1:
             raise ValueError("VLLM_GPU_COUNT must be at least 1")
+        if not 0 < self.vllm_gpu_memory_utilization <= 1:
+            raise ValueError("VLLM_GPU_MEMORY_UTILIZATION must be between 0 and 1")
+        if not 0 < self.vllm_gpu_memory_utilization_min <= 1:
+            raise ValueError("VLLM_GPU_MEMORY_UTILIZATION_MIN must be between 0 and 1")
+        if self.vllm_gpu_memory_utilization_min > self.vllm_gpu_memory_utilization:
+            raise ValueError("VLLM_GPU_MEMORY_UTILIZATION_MIN cannot exceed VLLM_GPU_MEMORY_UTILIZATION")
+        if not 0 <= self.vllm_gpu_memory_reserve_fraction < 1:
+            raise ValueError("VLLM_GPU_MEMORY_RESERVE_FRACTION must be between 0 and 1")
         visible_devices = self.cuda_visible_device_list
         if self.cuda_visible_devices and not visible_devices:
             raise ValueError("CUDA_VISIBLE_DEVICES must list at least one device when set")
-        if visible_devices and self.vllm_gpu_count > len(visible_devices):
+        if not self.vllm_gpu_auto_select and visible_devices and self.vllm_gpu_count > len(visible_devices):
             raise ValueError("VLLM_GPU_COUNT cannot exceed the number of CUDA_VISIBLE_DEVICES entries")

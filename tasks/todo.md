@@ -11,14 +11,18 @@
 - [x] Run verification and record results.
 - [x] Add explicit multi-GPU vLLM configuration for visible CUDA devices and GPU shard count.
 - [x] Add a repo-local model cache directory for Hugging Face and vLLM downloads.
+- [x] Surface actionable startup errors for invalid `VLLM_GPU_COUNT` tensor-parallel settings.
+- [x] Add adaptive startup GPU selection and dynamic vLLM memory utilization based on current free GPU memory.
 
 ## Review
 
 - Installed the project with `uv sync --extra dev` and verified the package wiring inside `.venv`.
 - Added explicit multi-GPU configuration support via `CUDA_VISIBLE_DEVICES` and `VLLM_GPU_COUNT`.
 - Added a repo-local model cache root via `MODEL_CACHE_DIR`, exported to Hugging Face cache environment variables before vLLM startup.
+- Added actionable startup errors when `VLLM_GPU_COUNT` is incompatible with a model's tensor-parallel requirements.
+- Added startup-only adaptive GPU selection using `nvidia-smi`, with best-GPU selection by free memory and derived `gpu_memory_utilization` when the preferred cap cannot be used.
 - Ran `uv run pytest -q`.
-- Result: `12 passed in 0.54s`.
+- Result: `23 passed in 0.58s`.
 
 ## GitHub Repo Prep
 
