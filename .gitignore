@@ -40,3 +40,8 @@ data/runtime/
 .idea/
 .vscode/
 *.swp
+
+
+## documents unnecessary 
+Goal.md
+AGENTS.md

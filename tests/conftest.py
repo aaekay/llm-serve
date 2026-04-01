@@ -1,0 +1,37 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from llm_serve.config import Settings
+
+
+def make_settings(tmp_path: Path, **overrides: Any) -> Settings:
+    env = {
+        "HOST": "127.0.0.1",
+        "PORT": "11424",
+        "INFERENCE_BACKEND": "mock",
+        "DEFAULT_MODEL_ID": "mock/default",
+        "MODEL_ALLOWLIST": "mock/default,mock/reasoning",
+        "REASONING_MODEL_ALLOWLIST": "mock/reasoning",
+        "PROMPT_MAX_PARALLEL": "8",
+        "BATCH_MAX_PARALLEL": "2",
+        "FOREGROUND_QUEUE_LIMIT": "16",
+        "BATCH_QUEUE_LIMIT": "64",
+        "MAX_INPUT_TOKENS": "4096",
+        "MAX_OUTPUT_TOKENS": "128",
+        "DEFAULT_TEMPERATURE": "0.2",
+        "DEFAULT_TOP_P": "0.95",
+        "STORAGE_ROOT": "runtime",
+        "REQUEST_TIMEOUT_SECONDS": "5",
+        "SWITCH_TIMEOUT_SECONDS": "5",
+        "STARTUP_LOAD_DEFAULT_MODEL": "true",
+        "VLLM_DTYPE": "auto",
+        "VLLM_TOKENIZER_MODE": "auto",
+        "VLLM_TRUST_REMOTE_CODE": "false",
+        "VLLM_GPU_MEMORY_UTILIZATION": "0.9",
+        "MOCK_RESPONSE_DELAY_SECONDS": "0.0",
+    }
+    for key, value in overrides.items():
+        env[key] = str(value)
+    return Settings.load(base_dir=tmp_path, environ=env)
