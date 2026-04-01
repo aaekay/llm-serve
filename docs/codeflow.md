@@ -12,6 +12,12 @@
 - Validation rejects `VLLM_GPU_COUNT` values larger than the number of configured visible devices.
 - Apply these settings before starting the server; they are startup/runtime initialization settings, not request-level controls.
 
+## Model Cache
+
+- `MODEL_CACHE_DIR` defaults to the repo-local `data/models/`.
+- Before vLLM is initialized, the backend creates that directory and exports `HF_HOME`, `HUGGINGFACE_HUB_CACHE`, and `TRANSFORMERS_CACHE` under it.
+- As a result, model weights and Hugging Face cache artifacts stay inside the repo-local cache tree unless the config is changed.
+
 ## Interactive Request Flow
 
 1. FastAPI receives either `/v1/*` or `/api/*` input and validates it with the request schemas.

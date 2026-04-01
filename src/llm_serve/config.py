@@ -66,6 +66,7 @@ class Settings:
     default_temperature: float
     default_top_p: float
     storage_root: Path
+    model_cache_dir: Path
     request_timeout_seconds: float
     switch_timeout_seconds: float
     startup_load_default_model: bool
@@ -93,6 +94,7 @@ class Settings:
         model_allowlist = _parse_csv(env_source.get("MODEL_ALLOWLIST", "mock/default,mock/reasoning"))
         reasoning_allowlist = _parse_csv(env_source.get("REASONING_MODEL_ALLOWLIST", "mock/reasoning"))
         default_model_id = env_source.get("DEFAULT_MODEL_ID", model_allowlist[0] if model_allowlist else "")
+        model_cache_dir = _optional_str(env_source.get("MODEL_CACHE_DIR")) or "data/models"
 
         settings = cls(
             host=env_source.get("HOST", "127.0.0.1"),
@@ -110,6 +112,7 @@ class Settings:
             default_temperature=float(env_source.get("DEFAULT_TEMPERATURE", "0.2")),
             default_top_p=float(env_source.get("DEFAULT_TOP_P", "0.95")),
             storage_root=(root / env_source.get("STORAGE_ROOT", "data/runtime")).resolve(),
+            model_cache_dir=(root / model_cache_dir).resolve(),
             request_timeout_seconds=float(env_source.get("REQUEST_TIMEOUT_SECONDS", "120")),
             switch_timeout_seconds=float(env_source.get("SWITCH_TIMEOUT_SECONDS", "600")),
             startup_load_default_model=_parse_bool(
@@ -135,6 +138,18 @@ class Settings:
         if not self.cuda_visible_devices:
             return []
         return _parse_csv(self.cuda_visible_devices)
+
+    @property
+    def huggingface_home(self) -> Path:
+        return self.model_cache_dir
+
+    @property
+    def huggingface_hub_cache(self) -> Path:
+        return self.model_cache_dir / "hub"
+
+    @property
+    def transformers_cache(self) -> Path:
+        return self.model_cache_dir / "transformers"
 
     def validate(self) -> None:
         if not self.model_allowlist:

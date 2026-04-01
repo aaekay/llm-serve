@@ -10,11 +10,13 @@
 - [x] Add developer docs and usage instructions.
 - [x] Run verification and record results.
 - [x] Add explicit multi-GPU vLLM configuration for visible CUDA devices and GPU shard count.
+- [x] Add a repo-local model cache directory for Hugging Face and vLLM downloads.
 
 ## Review
 
 - Installed the project with `uv sync --extra dev` and verified the package wiring inside `.venv`.
 - Added explicit multi-GPU configuration support via `CUDA_VISIBLE_DEVICES` and `VLLM_GPU_COUNT`.
+- Added a repo-local model cache root via `MODEL_CACHE_DIR`, exported to Hugging Face cache environment variables before vLLM startup.
 - Ran `uv run pytest -q`.
 - Result: `12 passed in 0.54s`.
 

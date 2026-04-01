@@ -23,6 +23,7 @@ def make_settings(tmp_path: Path, **overrides: Any) -> Settings:
         "DEFAULT_TEMPERATURE": "0.2",
         "DEFAULT_TOP_P": "0.95",
         "STORAGE_ROOT": "runtime",
+        "MODEL_CACHE_DIR": "models",
         "REQUEST_TIMEOUT_SECONDS": "5",
         "SWITCH_TIMEOUT_SECONDS": "5",
         "STARTUP_LOAD_DEFAULT_MODEL": "true",

@@ -20,6 +20,10 @@ def test_settings_load_cuda_visible_devices_and_gpu_count(tmp_path):
         VLLM_GPU_COUNT=2,
     )
 
+    assert settings.model_cache_dir == (tmp_path / "models").resolve()
+    assert settings.huggingface_home == (tmp_path / "models").resolve()
+    assert settings.huggingface_hub_cache == (tmp_path / "models" / "hub").resolve()
+    assert settings.transformers_cache == (tmp_path / "models" / "transformers").resolve()
     assert settings.cuda_visible_devices == "0,2,5"
     assert settings.cuda_visible_device_list == ["0", "2", "5"]
     assert settings.vllm_gpu_count == 2
@@ -59,11 +63,15 @@ def test_vllm_backend_applies_cuda_visible_devices_and_tensor_parallel_size(tmp_
     settings = make_settings(
         tmp_path,
         INFERENCE_BACKEND="vllm",
+        MODEL_CACHE_DIR="repo-model-cache",
         CUDA_VISIBLE_DEVICES="3,4",
         VLLM_GPU_COUNT=2,
     )
 
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.delenv("HF_HOME", raising=False)
+    monkeypatch.delenv("HUGGINGFACE_HUB_CACHE", raising=False)
+    monkeypatch.delenv("TRANSFORMERS_CACHE", raising=False)
     monkeypatch.setitem(
         sys.modules,
         "vllm",
@@ -77,6 +85,12 @@ def test_vllm_backend_applies_cuda_visible_devices_and_tensor_parallel_size(tmp_
     backend = VLLMModelBackend("mock/reasoning", settings)
     asyncio.run(backend.start())
 
+    assert settings.model_cache_dir.exists()
+    assert settings.huggingface_hub_cache.exists()
+    assert settings.transformers_cache.exists()
+    assert os.environ["HF_HOME"] == str(settings.huggingface_home)
+    assert os.environ["HUGGINGFACE_HUB_CACHE"] == str(settings.huggingface_hub_cache)
+    assert os.environ["TRANSFORMERS_CACHE"] == str(settings.transformers_cache)
     assert os.environ["CUDA_VISIBLE_DEVICES"] == "3,4"
     assert captured["engine_args"]["model"] == "mock/reasoning"
     assert captured["engine_args"]["tensor_parallel_size"] == 2

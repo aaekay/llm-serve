@@ -19,4 +19,5 @@ The default mock-safe code path exists to keep tests lightweight, but actual mod
 - The server binds to `127.0.0.1:11424` by default.
 - Interactive requests are capped by `PROMPT_MAX_PARALLEL`, which defaults to `8`.
 - Batch uploads, metadata, and generated outputs are stored under `STORAGE_ROOT`.
+- Model downloads and Hugging Face cache files are stored under `MODEL_CACHE_DIR`, which defaults to the repo-local `data/models/`.
 - Use `CUDA_VISIBLE_DEVICES` to choose which GPUs the process may see, and `VLLM_GPU_COUNT` to set how many of those visible GPUs vLLM should shard the model across.

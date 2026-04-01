@@ -74,7 +74,7 @@ class VLLMModelBackend(ModelBackend):
         async with self._engine_lock:
             if self._engine is not None:
                 return self._engine
-            self._apply_cuda_visible_devices()
+            self._apply_runtime_environment()
             try:
                 from vllm import AsyncEngineArgs, AsyncLLMEngine, SamplingParams
             except ImportError as exc:  # pragma: no cover - depends on runtime installation
@@ -95,7 +95,13 @@ class VLLMModelBackend(ModelBackend):
             self._sampling_params_cls = SamplingParams
             return self._engine
 
-    def _apply_cuda_visible_devices(self) -> None:
+    def _apply_runtime_environment(self) -> None:
+        self._settings.model_cache_dir.mkdir(parents=True, exist_ok=True)
+        self._settings.huggingface_hub_cache.mkdir(parents=True, exist_ok=True)
+        self._settings.transformers_cache.mkdir(parents=True, exist_ok=True)
+        os.environ["HF_HOME"] = str(self._settings.huggingface_home)
+        os.environ["HUGGINGFACE_HUB_CACHE"] = str(self._settings.huggingface_hub_cache)
+        os.environ["TRANSFORMERS_CACHE"] = str(self._settings.transformers_cache)
         if self._settings.cuda_visible_devices is None:
             return
         os.environ["CUDA_VISIBLE_DEVICES"] = self._settings.cuda_visible_devices
