@@ -171,8 +171,15 @@ class BatchManager:
 
         tasks = []
         defer_timeout_errors = self._should_retry_batch_timeouts()
+        max_concurrent = self.runtime.settings.batch_max_parallel + self.runtime.settings.batch_queue_limit
+        limiter = asyncio.Semaphore(max_concurrent)
+
+        async def _limited_process_line(line: str) -> Optional[_DeferredBatchTimeout]:
+            async with limiter:
+                return await self._process_line(batch_id, line, defer_timeout_errors=defer_timeout_errors)
+
         for line in raw_lines:
-            tasks.append(asyncio.create_task(self._process_line(batch_id, line, defer_timeout_errors=defer_timeout_errors)))
+            tasks.append(asyncio.create_task(_limited_process_line(line)))
 
         try:
             timeout_items = [item for item in await asyncio.gather(*tasks) if item is not None]
