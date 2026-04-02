@@ -62,3 +62,15 @@
 - Added `tqdm` to dependency metadata and refreshed `uv.lock`.
 - Ran `uv run pytest -q tests/test_batch_progress.py tests/test_app.py`.
 - Result: `9 passed in 0.37s`.
+
+## Startup Diagnostics
+
+- [x] Make the `DEFAULT_MODEL_ID` validation error include the bad value and current allowlist.
+- [x] Log startup self-test queue/start/pass/fail transitions so background failures are visible in server logs.
+- [x] Add regression tests covering the config error message and background self-test failure logging.
+
+- Verification:
+- Ran `uv run pytest -q tests/test_config.py tests/test_runtime_manager.py tests/test_app.py`.
+- Result: `18 passed in 1.12s`.
+- Ran `uv run pytest -q`.
+- Result: `43 passed in 1.15s`.

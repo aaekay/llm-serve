@@ -34,6 +34,7 @@
 - The default prompt is a thousand-word poem request so generation health is tested with a non-trivial output.
 - By default the self-test is launched in the background, so FastAPI startup completes after model load and `/healthz` reports `queued`, `running`, `passed`, or `failed`.
 - The runtime records completion tokens, latency, and tokens-per-second and exposes them via `/healthz`.
+- The runtime also logs default-model load, self-test queue/start transitions, and the final pass/fail result so background failures are visible without polling `/healthz`.
 - When `STARTUP_SELF_TEST_BLOCKING=true`, startup instead waits for the self-test to finish and fails immediately if generation fails.
 
 ## Interactive Request Flow

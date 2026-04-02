@@ -228,7 +228,10 @@ class Settings:
         if not self.model_allowlist:
             raise ValueError("MODEL_ALLOWLIST must not be empty")
         if self.default_model_id not in self.model_allowlist:
-            raise ValueError("DEFAULT_MODEL_ID must be present in MODEL_ALLOWLIST")
+            raise ValueError(
+                "DEFAULT_MODEL_ID '%s' must be present in MODEL_ALLOWLIST (%s)"
+                % (self.default_model_id, ", ".join(self.model_allowlist))
+            )
         if not set(self.reasoning_model_allowlist).issubset(set(self.model_allowlist)):
             raise ValueError("REASONING_MODEL_ALLOWLIST must be a subset of MODEL_ALLOWLIST")
         if self.prompt_max_parallel < 1:

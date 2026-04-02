@@ -33,7 +33,10 @@ def test_settings_loads_csv_and_boolean_fields(tmp_path):
 
 
 def test_settings_rejects_invalid_default_model(tmp_path):
-    with pytest.raises(ValueError):
+    with pytest.raises(
+        ValueError,
+        match=r"DEFAULT_MODEL_ID 'missing/model' must be present in MODEL_ALLOWLIST \(mock/default\)",
+    ):
         Settings.load(
             base_dir=tmp_path,
             environ={

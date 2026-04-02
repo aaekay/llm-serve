@@ -57,9 +57,12 @@ class RuntimeManager:
     async def startup(self) -> None:
         if not self.settings.startup_load_default_model:
             self._startup_self_test = StartupSelfTestResult(status="skipped")
+            logger.info("Startup default-model load is disabled; skipping startup self-test.")
             return
 
+        logger.info("Loading default model '%s' during startup.", self.settings.default_model_id)
         await self.ensure_loaded(self.settings.default_model_id)
+        logger.info("Default model '%s' is ready.", self.settings.default_model_id)
         await self._start_startup_self_test()
 
     async def shutdown(self) -> None:
@@ -371,6 +374,12 @@ class RuntimeManager:
             top_p=self.settings.default_top_p,
             stream=False,
         )
+        logger.info(
+            "Startup self-test started for model '%s' with max_output_tokens=%s and prompt=%r",
+            self.settings.default_model_id,
+            self.settings.startup_self_test_max_output_tokens,
+            _preview_text(prompt),
+        )
         started = time.perf_counter()
         try:
             result = await self._generate_with_active_backend(request)
@@ -412,11 +421,17 @@ class RuntimeManager:
         prompt = self.settings.startup_self_test_prompt.strip()
         if not self.settings.startup_self_test_enabled:
             self._startup_self_test = StartupSelfTestResult(status="disabled", prompt=prompt or None)
+            logger.info("Startup self-test is disabled.")
             return
         if not prompt:
             self._startup_self_test = StartupSelfTestResult(status="skipped")
+            logger.info("Startup self-test skipped because STARTUP_SELF_TEST_PROMPT is empty.")
             return
         if self.settings.startup_self_test_blocking:
+            logger.info(
+                "Startup self-test is running in blocking mode for model '%s'.",
+                self.settings.default_model_id,
+            )
             await self._run_startup_self_test()
             return
 
@@ -424,6 +439,12 @@ class RuntimeManager:
             status="queued",
             prompt=prompt,
             model_id=self.settings.default_model_id,
+        )
+        logger.info(
+            "Startup self-test queued for model '%s' with max_output_tokens=%s and prompt=%r",
+            self.settings.default_model_id,
+            self.settings.startup_self_test_max_output_tokens,
+            _preview_text(prompt),
         )
         self._startup_self_test_task = asyncio.create_task(self._run_startup_self_test_background())
         self._startup_self_test_task.add_done_callback(self._clear_startup_self_test_task)
@@ -477,3 +498,9 @@ class RuntimeManager:
             "error": self._startup_self_test.error,
         }
         return snapshot
+
+
+def _preview_text(text: str, limit: int = 160) -> str:
+    if len(text) <= limit:
+        return text
+    return "%s..." % text[: limit - 3]

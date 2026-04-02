@@ -44,6 +44,18 @@ class TrackingBackend(ModelBackend):
         yield "ok"
 
 
+class FailingSelfTestBackend(ModelBackend):
+    async def shutdown(self) -> None:
+        return None
+
+    async def generate(self, request: InferenceRequest) -> InferenceResult:
+        raise RuntimeError("startup self-test exploded")
+
+    async def generate_stream(self, request: InferenceRequest):
+        if False:
+            yield ""
+
+
 def test_runtime_manager_respects_parallel_limit(tmp_path):
     settings = make_settings(
         tmp_path,
@@ -163,3 +175,28 @@ def test_runtime_manager_background_self_test_does_not_consume_foreground_slots(
     initial_status, text = asyncio.run(scenario())
     assert initial_status in {"queued", "running"}
     assert text == "ok"
+
+
+def test_runtime_manager_logs_background_self_test_failure(tmp_path, caplog):
+    settings = make_settings(tmp_path)
+
+    async def factory(model_id: str) -> ModelBackend:
+        return FailingSelfTestBackend(model_id)
+
+    async def scenario():
+        runtime = RuntimeManager(settings, backend_factory=factory)
+        await runtime.startup()
+        await asyncio.sleep(0.05)
+        snapshot = runtime.health_snapshot()["startup_self_test"]
+        await runtime.shutdown()
+        return snapshot
+
+    with caplog.at_level("INFO"):
+        snapshot = asyncio.run(scenario())
+
+    assert snapshot["status"] == "failed"
+    assert snapshot["error"] == "startup self-test exploded"
+    assert "Loading default model 'mock/default' during startup." in caplog.text
+    assert "Startup self-test queued for model 'mock/default'" in caplog.text
+    assert "Startup self-test started for model 'mock/default'" in caplog.text
+    assert "Startup self-test failed for model 'mock/default'" in caplog.text
