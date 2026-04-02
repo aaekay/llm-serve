@@ -416,6 +416,11 @@ class RuntimeManager:
             latency_seconds,
             tokens_per_second,
         )
+        logger.info(
+            "Startup self-test output for model '%s':\n%s",
+            self.settings.default_model_id,
+            result.text,
+        )
 
     async def _start_startup_self_test(self) -> None:
         prompt = self.settings.startup_self_test_prompt.strip()
