@@ -83,6 +83,14 @@ class Settings:
     vllm_gpu_memory_utilization: float
     vllm_gpu_memory_utilization_min: float
     vllm_gpu_memory_reserve_fraction: float
+    ollama_base_url: str
+    ollama_request_timeout_seconds: float
+    ollama_request_timeout_retry_enabled: bool
+    ollama_request_timeout_retry_multiplier: float
+    ollama_batch_timeout_retry_enabled: bool
+    ollama_batch_timeout_retry_multiplier: float
+    ollama_batch_retry_output_tokens_multiplier: float
+    ollama_batch_retry_max_output_tokens: int
     mock_response_delay_seconds: float
 
     @classmethod
@@ -163,6 +171,36 @@ class Settings:
             vllm_gpu_memory_reserve_fraction=float(
                 env_source.get("VLLM_GPU_MEMORY_RESERVE_FRACTION", "0.05")
             ),
+            ollama_base_url=env_source.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/"),
+            ollama_request_timeout_seconds=float(
+                env_source.get(
+                    "OLLAMA_REQUEST_TIMEOUT_SECONDS",
+                    env_source.get("REQUEST_TIMEOUT_SECONDS", "120"),
+                )
+            ),
+            ollama_request_timeout_retry_enabled=_parse_bool(
+                env_source.get("OLLAMA_REQUEST_TIMEOUT_RETRY_ENABLED", "true"),
+                "OLLAMA_REQUEST_TIMEOUT_RETRY_ENABLED",
+            ),
+            ollama_request_timeout_retry_multiplier=float(
+                env_source.get("OLLAMA_REQUEST_TIMEOUT_RETRY_MULTIPLIER", "2.0")
+            ),
+            ollama_batch_timeout_retry_enabled=_parse_bool(
+                env_source.get("OLLAMA_BATCH_TIMEOUT_RETRY_ENABLED", "true"),
+                "OLLAMA_BATCH_TIMEOUT_RETRY_ENABLED",
+            ),
+            ollama_batch_timeout_retry_multiplier=float(
+                env_source.get("OLLAMA_BATCH_TIMEOUT_RETRY_MULTIPLIER", "2.0")
+            ),
+            ollama_batch_retry_output_tokens_multiplier=float(
+                env_source.get("OLLAMA_BATCH_RETRY_OUTPUT_TOKENS_MULTIPLIER", "2.0")
+            ),
+            ollama_batch_retry_max_output_tokens=int(
+                env_source.get(
+                    "OLLAMA_BATCH_RETRY_MAX_OUTPUT_TOKENS",
+                    str(int(env_source.get("MAX_OUTPUT_TOKENS", "1024")) * 2),
+                )
+            ),
             mock_response_delay_seconds=float(env_source.get("MOCK_RESPONSE_DELAY_SECONDS", "0.0")),
         )
         settings.validate()
@@ -209,8 +247,22 @@ class Settings:
             raise ValueError("FOREGROUND_QUEUE_LIMIT must be non-negative")
         if self.batch_queue_limit < 0:
             raise ValueError("BATCH_QUEUE_LIMIT must be non-negative")
-        if self.inference_backend not in {"mock", "vllm"}:
-            raise ValueError("INFERENCE_BACKEND must be 'mock' or 'vllm'")
+        if self.inference_backend not in {"mock", "vllm", "ollama"}:
+            raise ValueError("INFERENCE_BACKEND must be 'mock', 'vllm', or 'ollama'")
+        if not self.ollama_base_url:
+            raise ValueError("OLLAMA_BASE_URL must not be empty")
+        if self.ollama_request_timeout_seconds <= 0:
+            raise ValueError("OLLAMA_REQUEST_TIMEOUT_SECONDS must be greater than 0")
+        if self.ollama_request_timeout_retry_multiplier < 1:
+            raise ValueError("OLLAMA_REQUEST_TIMEOUT_RETRY_MULTIPLIER must be at least 1")
+        if self.ollama_batch_timeout_retry_multiplier < 1:
+            raise ValueError("OLLAMA_BATCH_TIMEOUT_RETRY_MULTIPLIER must be at least 1")
+        if self.ollama_batch_retry_output_tokens_multiplier < 1:
+            raise ValueError("OLLAMA_BATCH_RETRY_OUTPUT_TOKENS_MULTIPLIER must be at least 1")
+        if self.ollama_batch_retry_max_output_tokens < 1:
+            raise ValueError("OLLAMA_BATCH_RETRY_MAX_OUTPUT_TOKENS must be at least 1")
+        if self.inference_backend != "vllm":
+            return
         if self.vllm_gpu_count < 1:
             raise ValueError("VLLM_GPU_COUNT must be at least 1")
         if not 0 < self.vllm_gpu_memory_utilization <= 1:

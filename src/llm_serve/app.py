@@ -213,18 +213,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
 
     @app.get("/api/tags")
     async def ollama_tags():
-        return {
-            "models": [
-                {
-                    "name": model["id"],
-                    "model": model["id"],
-                    "size": 0,
-                    "digest": "",
-                    "details": {"loaded": model["loaded"]},
-                }
-                for model in runtime.list_models()
-            ]
-        }
+        return {"models": await runtime.list_tags()}
 
     @app.post("/api/pull")
     async def ollama_pull(payload: PullRequest):

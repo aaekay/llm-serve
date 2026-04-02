@@ -5,7 +5,7 @@ import logging
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import AsyncIterator, Awaitable, Callable, Dict, List, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional
 
 from llm_serve.config import Settings
 from llm_serve.errors import (
@@ -18,17 +18,25 @@ from llm_serve.types import InferenceRequest, InferenceResult, LoadStatus, Start
 
 from .base import ModelBackend
 from .mock import MockModelBackend
+from .ollama_backend import OllamaAPIClient, OllamaModelBackend
 from .vllm_backend import VLLMModelBackend
 
 
 BackendFactory = Callable[[str], Awaitable[ModelBackend]]
+OllamaClientFactory = Callable[[Settings], OllamaAPIClient]
 logger = logging.getLogger(__name__)
 
 
 class RuntimeManager:
-    def __init__(self, settings: Settings, backend_factory: Optional[BackendFactory] = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        backend_factory: Optional[BackendFactory] = None,
+        ollama_client_factory: Optional[OllamaClientFactory] = None,
+    ) -> None:
         self.settings = settings
         self._backend_factory = backend_factory or self._default_factory
+        self._ollama_client_factory = ollama_client_factory or OllamaAPIClient
         self._active_backend: Optional[ModelBackend] = None
         self._active_model_id: Optional[str] = None
         self._switch_lock = asyncio.Lock()
@@ -112,8 +120,41 @@ class RuntimeManager:
         if self.switch_in_progress and self._switch_target_model != model_id:
             raise ConflictError("Model switch already in progress for '%s'" % self._switch_target_model)
         if not self.switch_in_progress:
-            self._start_switch(model_id)
+            self._start_switch(model_id, pull_first=self.settings.inference_backend == "ollama")
         return LoadStatus(state="spinning_up", model_id=model_id, current_model=self._active_model_id)
+
+    async def list_tags(self) -> List[Dict[str, Any]]:
+        if self.settings.inference_backend != "ollama":
+            return [
+                {
+                    "name": model["id"],
+                    "model": model["id"],
+                    "size": 0,
+                    "digest": "",
+                    "details": {"loaded": model["loaded"]},
+                }
+                for model in self.list_models()
+            ]
+
+        client = self._ollama_client_factory(self.settings)
+        try:
+            upstream_models = await client.list_models()
+        finally:
+            await client.close()
+
+        filtered_models = []
+        for model in upstream_models:
+            model_name = OllamaAPIClient.extract_model_name(model)
+            if model_name not in self.settings.model_allowlist:
+                continue
+            normalized = dict(model)
+            normalized["name"] = normalized.get("name") or model_name
+            normalized["model"] = model_name
+            details = dict(normalized.get("details") or {})
+            details["loaded"] = model_name == self._active_model_id
+            normalized["details"] = details
+            filtered_models.append(normalized)
+        return filtered_models
 
     async def ensure_loaded(self, model_id: str) -> None:
         while True:
@@ -239,9 +280,15 @@ class RuntimeManager:
         except asyncio.TimeoutError as exc:
             raise GatewayTimeoutError("Model switch timed out") from exc
 
-    async def _perform_switch(self, model_id: str) -> None:
+    async def _perform_switch(self, model_id: str, pull_first: bool = False) -> None:
         self._last_switch_error = None
         await self._usage_idle.wait()
+        if pull_first and self.settings.inference_backend == "ollama":
+            client = self._ollama_client_factory(self.settings)
+            try:
+                await client.pull_model(model_id)
+            finally:
+                await client.close()
         new_backend = await self._backend_factory(model_id)
         await new_backend.start()
         old_backend = self._active_backend
@@ -251,11 +298,11 @@ class RuntimeManager:
         if old_backend is not None:
             await old_backend.shutdown()
 
-    def _start_switch(self, model_id: str) -> None:
+    def _start_switch(self, model_id: str, pull_first: bool = False) -> None:
         if self.switch_in_progress:
             return
         self._switch_target_model = model_id
-        self._switch_task = asyncio.create_task(self._perform_switch(model_id))
+        self._switch_task = asyncio.create_task(self._perform_switch(model_id, pull_first=pull_first))
         self._switch_task.add_done_callback(self._clear_finished_switch)
 
     def _clear_finished_switch(self, task: "asyncio.Task[None]") -> None:
@@ -270,6 +317,12 @@ class RuntimeManager:
     async def _default_factory(self, model_id: str) -> ModelBackend:
         if self.settings.inference_backend == "mock":
             return MockModelBackend(model_id, self.settings)
+        if self.settings.inference_backend == "ollama":
+            return OllamaModelBackend(
+                model_id,
+                self.settings,
+                client_factory=self._ollama_client_factory,
+            )
         return VLLMModelBackend(
             model_id,
             self.settings,
@@ -393,6 +446,8 @@ class RuntimeManager:
     async def _generate_with_active_backend(self, request: InferenceRequest) -> InferenceResult:
         async with self._backend_usage():
             backend = self._require_active_backend(request.model_id)
+            if self.settings.inference_backend == "ollama":
+                return await backend.generate(request)
             return await asyncio.wait_for(
                 backend.generate(request),
                 timeout=self.settings.request_timeout_seconds,

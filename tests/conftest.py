@@ -38,6 +38,14 @@ def make_settings(tmp_path: Path, **overrides: Any) -> Settings:
         "VLLM_GPU_MEMORY_UTILIZATION": "0.9",
         "VLLM_GPU_MEMORY_UTILIZATION_MIN": "0.5",
         "VLLM_GPU_MEMORY_RESERVE_FRACTION": "0.05",
+        "OLLAMA_BASE_URL": "http://127.0.0.1:11434",
+        "OLLAMA_REQUEST_TIMEOUT_SECONDS": "5",
+        "OLLAMA_REQUEST_TIMEOUT_RETRY_ENABLED": "true",
+        "OLLAMA_REQUEST_TIMEOUT_RETRY_MULTIPLIER": "2.0",
+        "OLLAMA_BATCH_TIMEOUT_RETRY_ENABLED": "true",
+        "OLLAMA_BATCH_TIMEOUT_RETRY_MULTIPLIER": "2.0",
+        "OLLAMA_BATCH_RETRY_OUTPUT_TOKENS_MULTIPLIER": "2.0",
+        "OLLAMA_BATCH_RETRY_MAX_OUTPUT_TOKENS": "256",
         "MOCK_RESPONSE_DELAY_SECONDS": "0.0",
     }
     for key, value in overrides.items():

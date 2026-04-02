@@ -2340,6 +2340,7 @@ source = { editable = "." }
 dependencies = [
     { name = "fastapi", version = "0.128.8", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
     { name = "fastapi", version = "0.135.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
+    { name = "httpx" },
     { name = "python-multipart", version = "0.0.20", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
     { name = "python-multipart", version = "0.0.22", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
     { name = "tqdm" },
@@ -2349,7 +2350,6 @@ dependencies = [
 
 [package.optional-dependencies]
 dev = [
-    { name = "httpx" },
     { name = "pytest" },
 ]
 runtime = [
@@ -2360,7 +2360,7 @@ runtime = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.110,<1.0" },
-    { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27,<1.0" },
+    { name = "httpx", specifier = ">=0.27,<1.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0,<9.0" },
     { name = "python-multipart", specifier = ">=0.0.9,<1.0" },
     { name = "tqdm", specifier = ">=4.66,<5.0" },

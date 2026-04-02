@@ -15,6 +15,12 @@ This server supports both API styles:
 llm-serve
 ```
 
+Backend notes:
+
+- `INFERENCE_BACKEND=vllm`: serves Hugging Face models directly through local vLLM.
+- `INFERENCE_BACKEND=ollama`: treats Ollama as an already-running upstream service at `OLLAMA_BASE_URL` while keeping the same `llm-serve` API surface, batching, and allowlist behavior.
+- In Ollama mode, direct non-batch requests can get one longer internal retry on upstream timeout before `llm-serve` returns an error.
+
 ## 2) OpenAI-Compatible Usage (`/v1/*`)
 
 ### Endpoints
@@ -184,7 +190,7 @@ print("reasoning:", reasoning)
 
 ### OpenAI Model Spin-Up (`202`)
 
-With `transformers` backend and model switching enabled, first request for an unloaded model can return `202`:
+With model switching enabled, first request for an unloaded model can return `202`:
 
 ```json
 {
@@ -228,6 +234,12 @@ curl -s http://127.0.0.1:11424/v1/batches \
     "completion_window": "24h"
   }'
 ```
+
+Batch timeout note for Ollama mode:
+
+- If an item times out talking to Ollama during the first pass, `llm-serve` keeps the batch running.
+- After the first pass finishes, timed-out items are retried once with a longer upstream timeout and a larger internal output-token limit.
+- The final success or failure is written into the original batch output/error artifacts.
 
 Poll status:
 
@@ -348,12 +360,15 @@ curl -s http://127.0.0.1:11424/api/tags
 
 Notes:
 
-- `transformers` backend: returns allowlisted models.
-- `vllm` / `tensorrt_llm`: returns the single served model.
+- `ollama` backend: returns allowlisted models that are already installed in the upstream Ollama server, with `details.loaded` showing the model currently active in `llm-serve`.
+- other backends: returns allowlisted models based on local runtime state.
 
 ### `POST /api/pull`
 
-Triggers async warmup/model-switch for allowlisted models (transformers backend).
+Triggers async model activation for allowlisted models.
+
+- In `ollama` mode, this is only an optional convenience proxy to Ollama. Use it when the upstream Ollama process still needs to pull the model.
+- In other backends, this is a warmup/model-switch operation only.
 
 ```bash
 curl -s http://127.0.0.1:11424/api/pull \

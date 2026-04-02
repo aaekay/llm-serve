@@ -66,6 +66,11 @@ class GatewayTimeoutError(ServiceError):
     error_type = "gateway_timeout_error"
 
 
+class UpstreamTimeoutError(ServiceError):
+    status_code = 504
+    error_type = "upstream_timeout_error"
+
+
 class UpstreamRuntimeError(ServiceError):
     status_code = 502
     error_type = "upstream_error"

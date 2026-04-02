@@ -14,6 +14,8 @@ class InferenceRequest:
     stream: bool
     reasoning_effort: Optional[str] = None
     include_reasoning: bool = False
+    upstream_timeout_seconds: Optional[float] = None
+    timeout_retry_enabled: bool = True
 
 
 @dataclass

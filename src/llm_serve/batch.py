@@ -3,13 +3,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import sys
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Dict, Optional, Protocol, TextIO
 
-from llm_serve.errors import BadRequestError
+from llm_serve.errors import BadRequestError, UpstreamTimeoutError
 from llm_serve.prompting import render_messages_to_prompt
 from llm_serve.schemas import BatchCreateRequest, BatchInputLine, BatchRecord, OpenAIChatRequest
 from llm_serve.storage import StorageManager, utc_timestamp
@@ -42,6 +43,21 @@ ProgressFactory = Callable[[str, int, int], _ProgressHandle]
 class _BatchProgressState:
     handle: _ProgressHandle
     position: int
+
+
+@dataclass
+class _PreparedBatchItem:
+    custom_id: str
+    include_reasoning: bool
+    inference_request: InferenceRequest
+
+
+@dataclass
+class _DeferredBatchTimeout:
+    custom_id: str
+    include_reasoning: bool
+    inference_request: InferenceRequest
+    error_message: str
 
 
 def _supports_live_progress(stream: TextIO) -> bool:
@@ -154,11 +170,14 @@ class BatchManager:
         self._start_progress(batch.id, batch.request_counts.total)
 
         tasks = []
+        defer_timeout_errors = self._should_retry_batch_timeouts()
         for line in raw_lines:
-            tasks.append(asyncio.create_task(self._process_line(batch_id, line)))
+            tasks.append(asyncio.create_task(self._process_line(batch_id, line, defer_timeout_errors=defer_timeout_errors)))
 
         try:
-            await asyncio.gather(*tasks)
+            timeout_items = [item for item in await asyncio.gather(*tasks) if item is not None]
+            if timeout_items and defer_timeout_errors and batch.status != "cancelling":
+                await self._run_timeout_retry_pass(batch_id, timeout_items)
             batch = self.storage.get_batch(batch_id)
             if batch.status == "cancelling":
                 batch.status = "cancelled"
@@ -182,29 +201,131 @@ class BatchManager:
             self._locks.pop(batch_id, None)
             self._tasks.pop(batch_id, None)
 
-    async def _process_line(self, batch_id: str, raw_line: str) -> None:
+    async def _process_line(
+        self,
+        batch_id: str,
+        raw_line: str,
+        defer_timeout_errors: bool = False,
+    ) -> Optional[_DeferredBatchTimeout]:
         batch = self.storage.get_batch(batch_id)
         if batch.status == "cancelling":
-            return
+            return None
         lock = self._locks[batch_id]
+        prepared_item: Optional[_PreparedBatchItem] = None
         try:
-            parsed = BatchInputLine.model_validate(json.loads(raw_line))
-            if parsed.method.upper() != "POST":
-                raise BadRequestError("Batch line method must be POST")
-            if parsed.url != "/v1/chat/completions":
-                raise BadRequestError("Batch line url must be /v1/chat/completions")
-            if parsed.body.get("stream") is True:
-                raise BadRequestError("Batch requests do not support stream=true")
-
-            openai_request = OpenAIChatRequest.model_validate(parsed.body)
-            model_id = self.runtime.resolve_model(openai_request.model, openai_request.reasoning_effort)
-            estimated_tokens = estimate_messages_tokens([message.model_dump() for message in openai_request.messages])
-            if estimated_tokens > self.runtime.settings.max_input_tokens:
-                raise BadRequestError(
-                    "Prompt too long: estimated %s tokens, max is %s"
-                    % (estimated_tokens, self.runtime.settings.max_input_tokens)
+            prepared_item = self._prepare_batch_item(raw_line, timeout_retry_enabled=False)
+            result = await self.runtime.run_batch(prepared_item.inference_request)
+            await self._record_success(
+                batch_id=batch_id,
+                custom_id=prepared_item.custom_id,
+                include_reasoning=prepared_item.include_reasoning,
+                result=result,
+                update_progress=True,
+            )
+            return None
+        except asyncio.CancelledError:
+            raise
+        except UpstreamTimeoutError as exc:
+            if defer_timeout_errors:
+                async with lock:
+                    self._advance_progress(batch_id)
+                return _DeferredBatchTimeout(
+                    custom_id=(prepared_item.custom_id if prepared_item is not None else _extract_custom_id(raw_line) or "<unknown>"),
+                    include_reasoning=prepared_item.include_reasoning if prepared_item is not None else False,
+                    inference_request=self._build_retry_request(
+                        prepared_item.inference_request
+                        if prepared_item is not None
+                        else self._prepare_batch_item(raw_line, timeout_retry_enabled=False).inference_request
+                    ),
+                    error_message=str(exc),
                 )
-            inference_request = InferenceRequest(
+            await self._record_error(
+                batch_id=batch_id,
+                custom_id=_extract_custom_id(raw_line),
+                message=str(exc),
+                update_progress=True,
+            )
+            return None
+        except Exception as exc:
+            await self._record_error(
+                batch_id=batch_id,
+                custom_id=_extract_custom_id(raw_line),
+                message=str(exc),
+                update_progress=True,
+            )
+            return None
+
+    async def _run_timeout_retry_pass(
+        self,
+        batch_id: str,
+        timeout_items: list[_DeferredBatchTimeout],
+    ) -> None:
+        logger.info("Batch %s starting Ollama timeout retry pass for %s items", batch_id, len(timeout_items))
+        self._set_retry_metadata(batch_id, scheduled=len(timeout_items), succeeded=0, failed=0)
+        retry_succeeded = 0
+        retry_failed = 0
+        for item in timeout_items:
+            batch = self.storage.get_batch(batch_id)
+            if batch.status == "cancelling":
+                break
+            try:
+                result = await self.runtime.run_batch(item.inference_request)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                retry_failed += 1
+                await self._record_error(
+                    batch_id=batch_id,
+                    custom_id=item.custom_id,
+                    message=str(exc),
+                    update_progress=False,
+                )
+                continue
+
+            retry_succeeded += 1
+            await self._record_success(
+                batch_id=batch_id,
+                custom_id=item.custom_id,
+                include_reasoning=item.include_reasoning,
+                result=result,
+                update_progress=False,
+            )
+
+        self._set_retry_metadata(
+            batch_id,
+            scheduled=len(timeout_items),
+            succeeded=retry_succeeded,
+            failed=retry_failed,
+        )
+        logger.info(
+            "Batch %s finished Ollama timeout retry pass scheduled=%s succeeded=%s failed=%s",
+            batch_id,
+            len(timeout_items),
+            retry_succeeded,
+            retry_failed,
+        )
+
+    def _prepare_batch_item(self, raw_line: str, timeout_retry_enabled: bool) -> _PreparedBatchItem:
+        parsed = BatchInputLine.model_validate(json.loads(raw_line))
+        if parsed.method.upper() != "POST":
+            raise BadRequestError("Batch line method must be POST")
+        if parsed.url != "/v1/chat/completions":
+            raise BadRequestError("Batch line url must be /v1/chat/completions")
+        if parsed.body.get("stream") is True:
+            raise BadRequestError("Batch requests do not support stream=true")
+
+        openai_request = OpenAIChatRequest.model_validate(parsed.body)
+        model_id = self.runtime.resolve_model(openai_request.model, openai_request.reasoning_effort)
+        estimated_tokens = estimate_messages_tokens([message.model_dump() for message in openai_request.messages])
+        if estimated_tokens > self.runtime.settings.max_input_tokens:
+            raise BadRequestError(
+                "Prompt too long: estimated %s tokens, max is %s"
+                % (estimated_tokens, self.runtime.settings.max_input_tokens)
+            )
+        return _PreparedBatchItem(
+            custom_id=parsed.custom_id,
+            include_reasoning=openai_request.include_reasoning,
+            inference_request=InferenceRequest(
                 model_id=model_id,
                 prompt=render_messages_to_prompt(openai_request.messages),
                 max_output_tokens=min(
@@ -218,48 +339,108 @@ class BatchManager:
                 stream=False,
                 reasoning_effort=openai_request.reasoning_effort,
                 include_reasoning=openai_request.include_reasoning,
-            )
-            result = await self.runtime.run_batch(inference_request)
-            response_body = _build_batch_response_body(
-                request_id="chatcmpl-" + uuid.uuid4().hex[:12],
-                model_id=result.model_id,
-                text=result.text,
-                prompt_tokens=result.prompt_tokens,
-                completion_tokens=result.completion_tokens,
-                reasoning=result.reasoning if openai_request.include_reasoning else None,
-            )
-            output_line = json.dumps(
-                {
-                    "custom_id": parsed.custom_id,
-                    "response": {
-                        "status_code": 200,
-                        "request_id": response_body["id"],
-                        "body": response_body,
-                    },
-                    "error": None,
-                }
-            ) + "\n"
-            async with lock:
-                self.storage.append_file_content(batch.output_file_id, output_line)
-                batch = self.storage.get_batch(batch_id)
-                batch.request_counts.completed += 1
-                self.storage.save_batch(batch)
+                timeout_retry_enabled=timeout_retry_enabled,
+            ),
+        )
+
+    def _build_retry_request(self, inference_request: InferenceRequest) -> InferenceRequest:
+        settings = self.runtime.settings
+        base_timeout = inference_request.upstream_timeout_seconds or settings.ollama_request_timeout_seconds
+        retry_timeout = base_timeout * settings.ollama_batch_timeout_retry_multiplier
+        retry_output_tokens = max(
+            inference_request.max_output_tokens,
+            min(
+                int(math.ceil(inference_request.max_output_tokens * settings.ollama_batch_retry_output_tokens_multiplier)),
+                settings.ollama_batch_retry_max_output_tokens,
+            ),
+        )
+        return InferenceRequest(
+            model_id=inference_request.model_id,
+            prompt=inference_request.prompt,
+            max_output_tokens=retry_output_tokens,
+            temperature=inference_request.temperature,
+            top_p=inference_request.top_p,
+            stream=False,
+            reasoning_effort=inference_request.reasoning_effort,
+            include_reasoning=inference_request.include_reasoning,
+            upstream_timeout_seconds=retry_timeout,
+            timeout_retry_enabled=False,
+        )
+
+    async def _record_success(
+        self,
+        batch_id: str,
+        custom_id: str,
+        include_reasoning: bool,
+        result,
+        update_progress: bool,
+    ) -> None:
+        response_body = _build_batch_response_body(
+            request_id="chatcmpl-" + uuid.uuid4().hex[:12],
+            model_id=result.model_id,
+            text=result.text,
+            prompt_tokens=result.prompt_tokens,
+            completion_tokens=result.completion_tokens,
+            reasoning=result.reasoning if include_reasoning else None,
+        )
+        output_line = json.dumps(
+            {
+                "custom_id": custom_id,
+                "response": {
+                    "status_code": 200,
+                    "request_id": response_body["id"],
+                    "body": response_body,
+                },
+                "error": None,
+            }
+        ) + "\n"
+        async with self._locks[batch_id]:
+            batch = self.storage.get_batch(batch_id)
+            self.storage.append_file_content(batch.output_file_id, output_line)
+            batch.request_counts.completed += 1
+            self.storage.save_batch(batch)
+            if update_progress:
                 self._advance_progress(batch_id)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            error_line = json.dumps(
-                {
-                    "custom_id": _extract_custom_id(raw_line),
-                    "error": {"message": str(exc)},
-                }
-            ) + "\n"
-            async with lock:
-                batch = self.storage.get_batch(batch_id)
-                self.storage.append_file_content(batch.error_file_id, error_line)
-                batch.request_counts.failed += 1
-                self.storage.save_batch(batch)
+
+    async def _record_error(
+        self,
+        batch_id: str,
+        custom_id: Optional[str],
+        message: str,
+        update_progress: bool,
+    ) -> None:
+        error_line = json.dumps(
+            {
+                "custom_id": custom_id,
+                "error": {"message": message},
+            }
+        ) + "\n"
+        async with self._locks[batch_id]:
+            batch = self.storage.get_batch(batch_id)
+            self.storage.append_file_content(batch.error_file_id, error_line)
+            batch.request_counts.failed += 1
+            self.storage.save_batch(batch)
+            if update_progress:
                 self._advance_progress(batch_id)
+
+    def _set_retry_metadata(
+        self,
+        batch_id: str,
+        scheduled: int,
+        succeeded: int,
+        failed: int,
+    ) -> None:
+        batch = self.storage.get_batch(batch_id)
+        batch.metadata["ollama_timeout_retry"] = {
+            "scheduled": scheduled,
+            "succeeded": succeeded,
+            "failed": failed,
+        }
+        self.storage.save_batch(batch)
+
+    def _should_retry_batch_timeouts(self) -> bool:
+        settings = self.runtime.settings
+        return settings.inference_backend == "ollama" and settings.ollama_batch_timeout_retry_enabled
 
     def _start_progress(self, batch_id: str, total: int) -> None:
         logger.info("Batch %s started with %s items", batch_id, total)

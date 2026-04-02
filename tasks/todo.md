@@ -15,6 +15,12 @@
 - [x] Add adaptive startup GPU selection and dynamic vLLM memory utilization based on current free GPU memory.
 - [x] Add a startup generation self-test prompt with tokens-per-second reporting.
 - [x] Make the startup self-test non-blocking so API readiness does not wait on a long warmup generation.
+- [x] Add `INFERENCE_BACKEND=ollama` support that uses a local Ollama server instead of vLLM/Hugging Face while preserving existing `/v1/*`, `/api/*`, and batch APIs.
+- [x] Proxy Ollama model pull/list/generate behavior through the runtime manager with strict allowlist enforcement and one-active-model semantics.
+- [x] Add Ollama backend tests plus docs and env configuration updates, then run verification.
+- [x] Add Ollama-specific upstream timeout controls with one longer retry for normal non-batch requests.
+- [x] Add Ollama batch timeout handling that defers timed-out items to a second retry pass with larger timeout and output-token limits.
+- [x] Consolidate Ollama batch retry outcomes into the original batch artifacts, update docs/env comments, and rerun verification.
 
 ## Review
 
@@ -25,8 +31,15 @@
 - Added startup-only adaptive GPU selection using `nvidia-smi`, with best-GPU selection by free memory and derived `gpu_memory_utilization` when the preferred cap cannot be used.
 - Added a startup self-test prompt and health-reporting for completion tokens, latency, and tokens-per-second.
 - Moved the startup self-test off the blocking startup path by default, added opt-in blocking mode, and kept self-test progress visible in health data without consuming developer request slots.
+- Added an Ollama runtime backend that preserves the current developer-facing API while switching upstream inference from vLLM/Hugging Face to Ollama on port `11434`.
+- Added strict allowlist filtering for upstream Ollama model tags, real upstream `/api/pull` proxying through the runtime switch path, and Ollama-backed batch compatibility.
+- Updated dependency metadata so `httpx` is part of the runtime install, refreshed `uv.lock`, and documented the new backend-specific config behavior.
+- Refined Ollama mode to behave purely as an upstream proxy with explicit timeout retry policy for direct requests and a second-pass retry flow for timed-out batch items.
+- Added dedicated Ollama timeout and retry config controls, including separate request retry and batch retry multipliers plus an internal batch retry output-token cap.
+- Changed Ollama batch processing so timed-out first-pass items are retried once after the batch pass completes and only their final consolidated outcome is written to the original batch output/error artifacts.
+- Updated docs and env comments to clarify that Ollama is already hosted externally and that llm-serve's Ollama responsibilities are upstream proxying, timeout handling, and batch orchestration.
 - Ran `uv run pytest -q`.
-- Result: `31 passed in 1.08s`.
+- Result: `42 passed in 1.28s`.
 
 ## GitHub Repo Prep
 
