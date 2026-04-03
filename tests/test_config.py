@@ -25,8 +25,8 @@ def test_settings_loads_csv_and_boolean_fields(tmp_path):
     assert settings.startup_load_default_model is False
     assert settings.startup_self_test_blocking is True
     assert settings.vllm_trust_remote_code is True
-    assert settings.vllm_enforce_eager is False
-    assert settings.vllm_use_v1 is None
+    assert settings.vllm_enforce_eager is True
+    assert settings.vllm_use_v1 is False
     assert settings.vllm_gpu_auto_select is False
     assert settings.ollama_base_url == "http://127.0.0.1:11434"
     assert settings.ollama_request_timeout_seconds == 120

@@ -328,19 +328,19 @@ def test_vllm_backend_sets_vllm_use_v1_env_var(tmp_path, monkeypatch):
         ),
     )
 
-    # When VLLM_USE_V1 is not set, env var should not be touched
-    settings_none = make_settings(tmp_path, INFERENCE_BACKEND="vllm", VLLM_GPU_AUTO_SELECT="false")
-    assert settings_none.vllm_use_v1 is None
-    backend = VLLMModelBackend("mock/reasoning", settings_none)
+    # Default (not set) uses V0 engine
+    settings_default = make_settings(tmp_path, INFERENCE_BACKEND="vllm", VLLM_GPU_AUTO_SELECT="false")
+    assert settings_default.vllm_use_v1 is False
+    backend = VLLMModelBackend("mock/reasoning", settings_default)
     asyncio.run(backend.start())
-    assert "VLLM_USE_V1" not in os.environ
-
-    # When VLLM_USE_V1=false, env var should be "0"
-    settings_off = make_settings(tmp_path, INFERENCE_BACKEND="vllm", VLLM_GPU_AUTO_SELECT="false", VLLM_USE_V1="false")
-    assert settings_off.vllm_use_v1 is False
-    backend2 = VLLMModelBackend("mock/reasoning", settings_off)
-    asyncio.run(backend2.start())
     assert os.environ["VLLM_USE_V1"] == "0"
+
+    # Explicit VLLM_USE_V1=true enables V1 engine
+    settings_on = make_settings(tmp_path, INFERENCE_BACKEND="vllm", VLLM_GPU_AUTO_SELECT="false", VLLM_USE_V1="true")
+    assert settings_on.vllm_use_v1 is True
+    backend2 = VLLMModelBackend("mock/reasoning", settings_on)
+    asyncio.run(backend2.start())
+    assert os.environ["VLLM_USE_V1"] == "1"
 
 
 def _gpu(index: int, total_mib: int, free_mib: int):

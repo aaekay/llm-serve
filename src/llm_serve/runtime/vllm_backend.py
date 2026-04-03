@@ -197,8 +197,7 @@ class VLLMModelBackend(ModelBackend):
         os.environ["HF_HOME"] = str(self._settings.huggingface_home)
         os.environ["HUGGINGFACE_HUB_CACHE"] = str(self._settings.huggingface_hub_cache)
         os.environ["TRANSFORMERS_CACHE"] = str(self._settings.transformers_cache)
-        if self._settings.vllm_use_v1 is not None:
-            os.environ["VLLM_USE_V1"] = "1" if self._settings.vllm_use_v1 else "0"
+        os.environ["VLLM_USE_V1"] = "1" if self._settings.vllm_use_v1 else "0"
         if self._effective_cuda_visible_devices is None:
             return
         os.environ["CUDA_VISIBLE_DEVICES"] = self._effective_cuda_visible_devices
