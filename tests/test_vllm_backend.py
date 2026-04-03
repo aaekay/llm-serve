@@ -297,6 +297,52 @@ def test_vllm_backend_reports_insufficient_gpu_memory_from_adaptive_selection(tm
     assert "Selected GPUs do not have enough free memory" in message
 
 
+def test_vllm_backend_sets_vllm_use_v1_env_var(tmp_path, monkeypatch):
+    captured = {}
+
+    class FakeAsyncEngineArgs:
+        def __init__(self, **kwargs):
+            captured["engine_args"] = kwargs
+
+    class FakeEngine:
+        def shutdown_background_loop(self):
+            return None
+
+    class FakeAsyncLLMEngine:
+        @classmethod
+        def from_engine_args(cls, args):
+            return FakeEngine()
+
+    class FakeSamplingParams:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    monkeypatch.delenv("VLLM_USE_V1", raising=False)
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm",
+        SimpleNamespace(
+            AsyncEngineArgs=FakeAsyncEngineArgs,
+            AsyncLLMEngine=FakeAsyncLLMEngine,
+            SamplingParams=FakeSamplingParams,
+        ),
+    )
+
+    # When VLLM_USE_V1 is not set, env var should not be touched
+    settings_none = make_settings(tmp_path, INFERENCE_BACKEND="vllm", VLLM_GPU_AUTO_SELECT="false")
+    assert settings_none.vllm_use_v1 is None
+    backend = VLLMModelBackend("mock/reasoning", settings_none)
+    asyncio.run(backend.start())
+    assert "VLLM_USE_V1" not in os.environ
+
+    # When VLLM_USE_V1=false, env var should be "0"
+    settings_off = make_settings(tmp_path, INFERENCE_BACKEND="vllm", VLLM_GPU_AUTO_SELECT="false", VLLM_USE_V1="false")
+    assert settings_off.vllm_use_v1 is False
+    backend2 = VLLMModelBackend("mock/reasoning", settings_off)
+    asyncio.run(backend2.start())
+    assert os.environ["VLLM_USE_V1"] == "0"
+
+
 def _gpu(index: int, total_mib: int, free_mib: int):
     used_mib = total_mib - free_mib
     return SimpleNamespace(

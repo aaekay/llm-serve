@@ -82,6 +82,7 @@ class Settings:
     vllm_tokenizer_mode: str
     vllm_trust_remote_code: bool
     vllm_enforce_eager: bool
+    vllm_use_v1: Optional[bool]
     vllm_gpu_auto_select: bool
     cuda_visible_devices: Optional[str]
     vllm_gpu_count: int
@@ -172,6 +173,9 @@ class Settings:
                 env_source.get("VLLM_ENFORCE_EAGER", "false"),
                 "VLLM_ENFORCE_EAGER",
             ),
+            vllm_use_v1=_parse_bool(env_source["VLLM_USE_V1"], "VLLM_USE_V1")
+            if "VLLM_USE_V1" in env_source
+            else None,
             vllm_gpu_auto_select=_parse_bool(
                 env_source.get("VLLM_GPU_AUTO_SELECT", "true"),
                 "VLLM_GPU_AUTO_SELECT",

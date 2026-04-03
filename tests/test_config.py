@@ -26,6 +26,7 @@ def test_settings_loads_csv_and_boolean_fields(tmp_path):
     assert settings.startup_self_test_blocking is True
     assert settings.vllm_trust_remote_code is True
     assert settings.vllm_enforce_eager is False
+    assert settings.vllm_use_v1 is None
     assert settings.vllm_gpu_auto_select is False
     assert settings.ollama_base_url == "http://127.0.0.1:11434"
     assert settings.ollama_request_timeout_seconds == 120
@@ -133,6 +134,30 @@ def test_settings_parses_vllm_enforce_eager(tmp_path):
     )
 
     assert settings.vllm_enforce_eager is True
+
+
+def test_settings_parses_vllm_use_v1(tmp_path):
+    off = Settings.load(
+        base_dir=tmp_path,
+        environ={
+            "DEFAULT_MODEL_ID": "mock/default",
+            "MODEL_ALLOWLIST": "mock/default,mock/reasoning",
+            "REASONING_MODEL_ALLOWLIST": "mock/reasoning",
+            "VLLM_USE_V1": "false",
+        },
+    )
+    on = Settings.load(
+        base_dir=tmp_path,
+        environ={
+            "DEFAULT_MODEL_ID": "mock/default",
+            "MODEL_ALLOWLIST": "mock/default,mock/reasoning",
+            "REASONING_MODEL_ALLOWLIST": "mock/reasoning",
+            "VLLM_USE_V1": "true",
+        },
+    )
+
+    assert off.vllm_use_v1 is False
+    assert on.vllm_use_v1 is True
 
 
 def test_settings_reject_startup_self_test_tokens_above_max_output_tokens(tmp_path):
