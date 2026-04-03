@@ -67,15 +67,15 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     @app.get("/healthz")
     async def healthz():
         snapshot = runtime.health_snapshot()
-        batches = storage.list_batches()
+        batch_total, batch_in_progress = batch_manager.batch_counts()
         return {
             "status": "ok",
             "loaded": snapshot["loaded"],
             "model_id": snapshot["model_id"],
             "inference_backend": snapshot["inference_backend"],
             "queue_depth": snapshot["queue_depth"],
-            "batch_jobs_total": len(batches),
-            "batch_jobs_in_progress": len([batch for batch in batches if batch.status in {"queued", "validating", "in_progress"}]),
+            "batch_jobs_total": batch_total,
+            "batch_jobs_in_progress": batch_in_progress,
             "batch_queue_depth": snapshot["batch_queue_depth"],
             "switch_in_progress": snapshot["switch_in_progress"],
             "switch_target_model": snapshot["switch_target_model"],
@@ -101,6 +101,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             stream=payload.stream,
             reasoning_effort=payload.reasoning_effort,
             include_reasoning=payload.include_reasoning,
+            messages=[message.model_dump() for message in payload.messages],
         )
 
         load_status = runtime.check_readiness(model_id)
@@ -147,8 +148,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
 
     @app.post("/api/chat")
     async def ollama_chat(payload: OllamaChatRequest):
-        options = payload.options or {}
-        reasoning_effort = getattr(options, "reasoning_effort", None)
+        options = payload.options
+        reasoning_effort = options.reasoning_effort if options is not None else None
         model_id = runtime.resolve_model(payload.model, reasoning_effort)
         prompt_tokens = estimate_messages_tokens([message.model_dump() for message in payload.messages])
         _validate_input_tokens(prompt_tokens, settings.max_input_tokens)
@@ -162,7 +163,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             top_p=_resolve_ollama_top_p(payload, settings.default_top_p),
             stream=payload.stream,
             reasoning_effort=reasoning_effort,
-            include_reasoning=bool(getattr(options, "include_reasoning", False)),
+            include_reasoning=bool(options.include_reasoning) if options is not None else False,
+            messages=[message.model_dump() for message in payload.messages],
         )
 
         load_status = runtime.check_readiness(model_id)
@@ -179,8 +181,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
 
     @app.post("/api/generate")
     async def ollama_generate(payload: OllamaGenerateRequest):
-        options = payload.options or {}
-        reasoning_effort = getattr(options, "reasoning_effort", None)
+        options = payload.options
+        reasoning_effort = options.reasoning_effort if options is not None else None
         model_id = runtime.resolve_model(payload.model, reasoning_effort)
         prompt_tokens = estimate_text_tokens(payload.prompt)
         _validate_input_tokens(prompt_tokens, settings.max_input_tokens)
@@ -193,7 +195,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             top_p=_resolve_ollama_top_p(payload, settings.default_top_p),
             stream=payload.stream,
             reasoning_effort=reasoning_effort,
-            include_reasoning=bool(getattr(options, "include_reasoning", False)),
+            include_reasoning=bool(options.include_reasoning) if options is not None else False,
         )
 
         load_status = runtime.check_readiness(model_id)

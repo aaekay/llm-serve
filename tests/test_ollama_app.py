@@ -76,6 +76,13 @@ class FakeOllamaAPIClient:
             reasoning="fake reasoning" if request.include_reasoning else None,
         )
 
+    async def chat(self, request):
+        return await self.generate(request)
+
+    async def chat_stream(self, request):
+        yield "ollama "
+        yield "stream"
+
     async def generate_stream(self, request):
         yield "ollama "
         yield "stream"

@@ -43,6 +43,8 @@ def load_dotenv(path: Path) -> Dict[str, str]:
             continue
         key, value = line.split("=", 1)
         key = key.strip()
+        if key.startswith("export "):
+            key = key[len("export "):].strip()
         value = value.strip().strip("'").strip('"')
         if key:
             parsed[key] = value
@@ -91,6 +93,7 @@ class Settings:
     ollama_batch_timeout_retry_multiplier: float
     ollama_batch_retry_output_tokens_multiplier: float
     ollama_batch_retry_max_output_tokens: int
+    storage_retention_hours: int
     mock_response_delay_seconds: float
 
     @classmethod
@@ -201,6 +204,7 @@ class Settings:
                     str(int(env_source.get("MAX_OUTPUT_TOKENS", "1024")) * 2),
                 )
             ),
+            storage_retention_hours=int(env_source.get("STORAGE_RETENTION_HOURS", "720")),
             mock_response_delay_seconds=float(env_source.get("MOCK_RESPONSE_DELAY_SECONDS", "0.0")),
         )
         settings.validate()
@@ -250,6 +254,8 @@ class Settings:
             raise ValueError("FOREGROUND_QUEUE_LIMIT must be non-negative")
         if self.batch_queue_limit < 0:
             raise ValueError("BATCH_QUEUE_LIMIT must be non-negative")
+        if self.storage_retention_hours < 0:
+            raise ValueError("STORAGE_RETENTION_HOURS must be non-negative (0 disables cleanup)")
         if self.inference_backend not in {"mock", "vllm", "ollama"}:
             raise ValueError("INFERENCE_BACKEND must be 'mock', 'vllm', or 'ollama'")
         if not self.ollama_base_url:

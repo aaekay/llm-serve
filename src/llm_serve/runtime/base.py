@@ -21,6 +21,13 @@ class ModelBackend(ABC):
     async def generate(self, request: InferenceRequest) -> InferenceResult:
         raise NotImplementedError
 
+    async def generate_chat(self, request: InferenceRequest) -> InferenceResult:
+        return await self.generate(request)
+
     @abstractmethod
     async def generate_stream(self, request: InferenceRequest) -> AsyncIterator[str]:
         raise NotImplementedError
+
+    async def generate_chat_stream(self, request: InferenceRequest) -> AsyncIterator[str]:
+        async for chunk in self.generate_stream(request):
+            yield chunk

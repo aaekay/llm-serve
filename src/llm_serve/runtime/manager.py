@@ -51,6 +51,7 @@ class RuntimeManager:
         self._startup_self_test_task: Optional["asyncio.Task[None]"] = None
         self._foreground_pending = 0
         self._batch_pending = 0
+        self._pending_lock = asyncio.Lock()
         self._foreground_semaphore = asyncio.Semaphore(settings.prompt_max_parallel)
         self._batch_semaphore = asyncio.Semaphore(settings.batch_max_parallel)
 
@@ -196,17 +197,25 @@ class RuntimeManager:
         )
 
     async def stream_foreground(self, request: InferenceRequest) -> AsyncIterator[str]:
-        if self._foreground_pending >= self.settings.prompt_max_parallel + self.settings.foreground_queue_limit:
-            raise TooManyRequestsError("Foreground queue is full")
-        self._foreground_pending += 1
+        async with self._pending_lock:
+            if self._foreground_pending >= self.settings.prompt_max_parallel + self.settings.foreground_queue_limit:
+                raise TooManyRequestsError("Foreground queue is full")
+            self._foreground_pending += 1
         await self._foreground_semaphore.acquire()
         try:
             async with self._backend_usage():
                 backend = self._require_active_backend(request.model_id)
-                async for chunk in backend.generate_stream(request):
+                use_chat = request.messages is not None
+                stream = backend.generate_chat_stream(request) if use_chat else backend.generate_stream(request)
+                if self.settings.inference_backend != "ollama":
+                    stream = self._timeout_stream(stream, self.settings.request_timeout_seconds)
+                async for chunk in stream:
                     yield chunk
+        except asyncio.TimeoutError as exc:
+            raise GatewayTimeoutError("Streaming request timed out") from exc
         finally:
-            self._foreground_pending -= 1
+            async with self._pending_lock:
+                self._foreground_pending -= 1
             self._foreground_semaphore.release()
 
     async def run_batch(self, request: InferenceRequest) -> InferenceResult:
@@ -260,10 +269,11 @@ class RuntimeManager:
             else self.settings.batch_max_parallel + self.settings.batch_queue_limit
         )
 
-        if getattr(self, pending_attr) >= limit:
-            raise TooManyRequestsError("%s queue is full" % lane.capitalize())
+        async with self._pending_lock:
+            if getattr(self, pending_attr) >= limit:
+                raise TooManyRequestsError("%s queue is full" % lane.capitalize())
+            setattr(self, pending_attr, getattr(self, pending_attr) + 1)
 
-        setattr(self, pending_attr, getattr(self, pending_attr) + 1)
         await semaphore.acquire()
         try:
             if wait_for_model:
@@ -272,7 +282,8 @@ class RuntimeManager:
         except asyncio.TimeoutError as exc:
             raise GatewayTimeoutError("Inference request timed out") from exc
         finally:
-            setattr(self, pending_attr, getattr(self, pending_attr) - 1)
+            async with self._pending_lock:
+                setattr(self, pending_attr, getattr(self, pending_attr) - 1)
             semaphore.release()
 
     async def _await_switch(self, task: Optional["asyncio.Task[None]"]) -> None:
@@ -313,6 +324,7 @@ class RuntimeManager:
             task.result()
         except Exception as exc:
             self._last_switch_error = str(exc)
+            self._switch_target_model = None
         finally:
             if self._switch_task is task:
                 self._switch_task = None
@@ -469,13 +481,24 @@ class RuntimeManager:
         except Exception:
             return
 
+    async def _timeout_stream(self, stream: AsyncIterator[str], timeout: float) -> AsyncIterator[str]:
+        ait = stream.__aiter__()
+        while True:
+            try:
+                chunk = await asyncio.wait_for(ait.__anext__(), timeout=timeout)
+                yield chunk
+            except StopAsyncIteration:
+                return
+
     async def _generate_with_active_backend(self, request: InferenceRequest) -> InferenceResult:
         async with self._backend_usage():
             backend = self._require_active_backend(request.model_id)
+            use_chat = request.messages is not None
+            coro = backend.generate_chat(request) if use_chat else backend.generate(request)
             if self.settings.inference_backend == "ollama":
-                return await backend.generate(request)
+                return await coro
             return await asyncio.wait_for(
-                backend.generate(request),
+                coro,
                 timeout=self.settings.request_timeout_seconds,
             )
 

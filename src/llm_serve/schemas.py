@@ -1,23 +1,36 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, field_validator
 
 
+class TextContentPart(BaseModel):
+    type: Literal["text"]
+    text: str
+
+
+class ImageContentPart(BaseModel):
+    type: Literal["image_url"]
+    image_url: Dict[str, Any]
+
+
+ContentPart = Union[TextContentPart, ImageContentPart]
+
+
 class ChatMessage(BaseModel):
-    role: Literal["system", "user", "assistant"]
-    content: str
+    role: Literal["system", "user", "assistant", "tool"]
+    content: Union[str, List[ContentPart]]
 
 
 class OpenAIChatRequest(BaseModel):
     messages: List[ChatMessage]
     model: Optional[str] = None
     stream: bool = False
-    temperature: Optional[float] = None
-    top_p: Optional[float] = None
-    max_tokens: Optional[int] = Field(default=None, ge=1, le=8192)
-    max_completion_tokens: Optional[int] = Field(default=None, ge=1, le=8192)
+    temperature: Optional[float] = Field(default=None, ge=0, le=2)
+    top_p: Optional[float] = Field(default=None, ge=0, le=1)
+    max_tokens: Optional[int] = Field(default=None, ge=1)
+    max_completion_tokens: Optional[int] = Field(default=None, ge=1)
     reasoning_effort: Optional[Literal["low", "medium", "high"]] = None
     include_reasoning: bool = False
 
@@ -38,8 +51,8 @@ class OpenAIChatRequest(BaseModel):
 
 class OllamaOptions(BaseModel):
     num_predict: Optional[int] = Field(default=None, ge=1)
-    temperature: Optional[float] = None
-    top_p: Optional[float] = None
+    temperature: Optional[float] = Field(default=None, ge=0, le=2)
+    top_p: Optional[float] = Field(default=None, ge=0, le=1)
     reasoning_effort: Optional[Literal["low", "medium", "high"]] = None
     include_reasoning: Optional[bool] = None
 

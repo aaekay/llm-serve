@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional
 
 
 @dataclass
@@ -14,6 +14,7 @@ class InferenceRequest:
     stream: bool
     reasoning_effort: Optional[str] = None
     include_reasoning: bool = False
+    messages: Optional[List[Dict[str, object]]] = field(default=None, repr=False)
     upstream_timeout_seconds: Optional[float] = None
     timeout_retry_enabled: bool = True
 

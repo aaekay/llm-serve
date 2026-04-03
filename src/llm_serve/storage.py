@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List
 
-from llm_serve.errors import NotFoundError
+from llm_serve.errors import BadRequestError, NotFoundError
 from llm_serve.schemas import BatchRecord, FileRecord
 
 
@@ -99,11 +99,37 @@ class StorageManager:
             encoding="utf-8",
         )
 
+    def cleanup_old_batches(self, max_age_hours: int) -> int:
+        if max_age_hours <= 0:
+            return 0
+        now = utc_timestamp()
+        cutoff = now - (max_age_hours * 3600)
+        deleted = 0
+        for path in list(self.batches_dir.glob("*.json")):
+            try:
+                batch = BatchRecord.model_validate(json.loads(path.read_text(encoding="utf-8")))
+            except Exception:
+                continue
+            if batch.completed_at is not None and batch.completed_at < cutoff:
+                path.unlink(missing_ok=True)
+                for file_id in [batch.output_file_id, batch.error_file_id, batch.input_file_id]:
+                    if file_id:
+                        self._meta_path(file_id).unlink(missing_ok=True)
+                        self._content_path(file_id).unlink(missing_ok=True)
+                deleted += 1
+        return deleted
+
+    def _safe_path(self, base: Path, name: str) -> Path:
+        resolved = (base / name).resolve()
+        if not resolved.is_relative_to(base.resolve()):
+            raise BadRequestError("Invalid identifier")
+        return resolved
+
     def _meta_path(self, file_id: str) -> Path:
-        return self.files_meta_dir / ("%s.json" % file_id)
+        return self._safe_path(self.files_meta_dir, "%s.json" % file_id)
 
     def _content_path(self, file_id: str) -> Path:
-        return self.files_content_dir / ("%s.bin" % file_id)
+        return self._safe_path(self.files_content_dir, "%s.bin" % file_id)
 
     def _batch_path(self, batch_id: str) -> Path:
-        return self.batches_dir / ("%s.json" % batch_id)
+        return self._safe_path(self.batches_dir, "%s.json" % batch_id)

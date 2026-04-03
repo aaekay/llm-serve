@@ -158,6 +158,95 @@ class OllamaAPIClient:
                     "Failed to reach Ollama at %s: %s" % (self._settings.ollama_base_url, exc)
                 ) from exc
 
+    async def chat(self, request: InferenceRequest) -> InferenceResult:
+        timeouts = self._request_timeouts_for_request(request)
+        for attempt_index, timeout_seconds in enumerate(timeouts):
+            try:
+                response = await self._request(
+                    "POST",
+                    "/api/chat",
+                    json_body=self._build_chat_payload(request, stream=False),
+                    timeout=timeout_seconds,
+                    action="chat with",
+                    error_cls=UpstreamRuntimeError,
+                    timeout_error_cls=UpstreamTimeoutError,
+                )
+            except UpstreamTimeoutError:
+                if attempt_index == len(timeouts) - 1:
+                    raise
+                continue
+
+            payload = self._parse_json(response, action="chat with", error_cls=UpstreamRuntimeError)
+            message = payload.get("message")
+            if not isinstance(message, dict):
+                raise UpstreamRuntimeError(
+                    "Ollama at %s returned an invalid chat payload." % self._settings.ollama_base_url
+                )
+            response_text = message.get("content", "")
+            prompt_tokens = payload.get("prompt_eval_count")
+            completion_tokens = payload.get("eval_count")
+            reasoning = payload.get("thinking") or message.get("thinking")
+            return InferenceResult(
+                model_id=request.model_id,
+                text=response_text if isinstance(response_text, str) else "",
+                prompt_tokens=prompt_tokens if isinstance(prompt_tokens, int) else estimate_text_tokens(request.prompt),
+                completion_tokens=completion_tokens
+                if isinstance(completion_tokens, int)
+                else estimate_text_tokens(response_text if isinstance(response_text, str) else ""),
+                reasoning=reasoning if isinstance(reasoning, str) else None,
+            )
+
+        raise UpstreamTimeoutError("Timed out while chatting with Ollama at %s." % self._settings.ollama_base_url)
+
+    async def chat_stream(self, request: InferenceRequest) -> AsyncIterator[str]:
+        payload = self._build_chat_payload(request, stream=True)
+        timeouts = self._request_timeouts_for_request(request)
+        for attempt_index, timeout_seconds in enumerate(timeouts):
+            emitted_chunk = False
+            try:
+                async with self._client.stream(
+                    "POST",
+                    "/api/chat",
+                    json=payload,
+                    timeout=timeout_seconds,
+                ) as response:
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        if not line:
+                            continue
+                        try:
+                            item = json.loads(line)
+                        except json.JSONDecodeError as exc:
+                            raise UpstreamRuntimeError(
+                                "Ollama at %s returned invalid streaming JSON." % self._settings.ollama_base_url
+                            ) from exc
+                        if item.get("error"):
+                            raise UpstreamRuntimeError(str(item["error"]))
+                        message = item.get("message")
+                        if isinstance(message, dict):
+                            chunk = message.get("content")
+                            if isinstance(chunk, str) and chunk:
+                                emitted_chunk = True
+                                yield chunk
+                        if item.get("done") is True:
+                            return
+                return
+            except httpx.HTTPStatusError as exc:
+                raise UpstreamRuntimeError(
+                    "Ollama request to %s failed with status %s: %s"
+                    % (self._settings.ollama_base_url, exc.response.status_code, exc.response.text)
+                ) from exc
+            except httpx.TimeoutException as exc:
+                if emitted_chunk or attempt_index == len(timeouts) - 1:
+                    raise UpstreamTimeoutError(
+                        "Timed out while streaming chat from Ollama at %s." % self._settings.ollama_base_url
+                    ) from exc
+                continue
+            except httpx.HTTPError as exc:
+                raise UpstreamRuntimeError(
+                    "Failed to reach Ollama at %s: %s" % (self._settings.ollama_base_url, exc)
+                ) from exc
+
     @staticmethod
     def extract_model_name(model: Dict[str, Any]) -> str:
         raw_name = model.get("model") or model.get("name") or ""
@@ -216,6 +305,23 @@ class OllamaAPIClient:
             raise error_cls(str(payload["error"]))
         return payload
 
+    def _build_chat_payload(self, request: InferenceRequest, stream: bool) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "model": request.model_id,
+            "messages": request.messages or [{"role": "user", "content": request.prompt}],
+            "stream": stream,
+            "options": {
+                "num_predict": request.max_output_tokens,
+                "temperature": request.temperature,
+                "top_p": request.top_p,
+            },
+        }
+        if request.reasoning_effort:
+            payload["think"] = request.reasoning_effort
+        elif request.include_reasoning:
+            payload["think"] = True
+        return payload
+
     def _build_generate_payload(self, request: InferenceRequest, stream: bool) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
             "model": request.model_id,
@@ -266,8 +372,15 @@ class OllamaModelBackend(ModelBackend):
     async def generate(self, request: InferenceRequest) -> InferenceResult:
         return await self._get_client().generate(request)
 
+    async def generate_chat(self, request: InferenceRequest) -> InferenceResult:
+        return await self._get_client().chat(request)
+
     async def generate_stream(self, request: InferenceRequest) -> AsyncIterator[str]:
         async for chunk in self._get_client().generate_stream(request):
+            yield chunk
+
+    async def generate_chat_stream(self, request: InferenceRequest) -> AsyncIterator[str]:
+        async for chunk in self._get_client().chat_stream(request):
             yield chunk
 
     def _get_client(self) -> OllamaAPIClient:

@@ -98,10 +98,18 @@ class BatchManager:
             lambda batch_id, total, position: _create_tqdm_progress(batch_id, total, position, progress_stream)
         )
         self._progress: Dict[str, _BatchProgressState] = {}
+        self._batch_total = 0
+        self._batch_in_progress = 0
+        self._cleanup_task: Optional["asyncio.Task[None]"] = None
+
+    def batch_counts(self) -> tuple:
+        return self._batch_total, self._batch_in_progress
 
     async def startup(self) -> None:
         for batch in self.storage.list_batches():
+            self._batch_total += 1
             if batch.status in {"queued", "validating"}:
+                self._batch_in_progress += 1
                 self.enqueue(batch.id)
             elif batch.status in {"in_progress", "cancelling"}:
                 batch.status = "failed"
@@ -109,8 +117,32 @@ class BatchManager:
                 batch.error = {"message": "Batch interrupted by process restart"}
                 self.storage.save_batch(batch)
                 logger.warning("Batch %s marked failed during startup recovery after process restart", batch.id)
+        retention = self.runtime.settings.storage_retention_hours
+        if retention > 0:
+            deleted = self.storage.cleanup_old_batches(retention)
+            if deleted:
+                self._batch_total = max(0, self._batch_total - deleted)
+                logger.info("Cleaned up %s old batches (retention=%sh)", deleted, retention)
+            self._cleanup_task = asyncio.create_task(self._periodic_cleanup(retention))
+
+    async def _periodic_cleanup(self, retention_hours: int) -> None:
+        while True:
+            await asyncio.sleep(3600)
+            try:
+                deleted = self.storage.cleanup_old_batches(retention_hours)
+                if deleted:
+                    self._batch_total = max(0, self._batch_total - deleted)
+                    logger.info("Periodic cleanup removed %s old batches", deleted)
+            except Exception:
+                logger.exception("Periodic batch cleanup failed")
 
     async def shutdown(self) -> None:
+        if self._cleanup_task and not self._cleanup_task.done():
+            self._cleanup_task.cancel()
+            try:
+                await self._cleanup_task
+            except asyncio.CancelledError:
+                pass
         for task in list(self._tasks.values()):
             task.cancel()
         for batch_id, task in list(self._tasks.items()):
@@ -136,6 +168,8 @@ class BatchManager:
             endpoint=request.endpoint,
             completion_window=request.completion_window,
         )
+        self._batch_total += 1
+        self._batch_in_progress += 1
         self.enqueue(batch.id)
         return batch
 
@@ -194,6 +228,7 @@ class BatchManager:
                 batch.status = "completed"
             batch.completed_at = utc_timestamp()
             self.storage.save_batch(batch)
+            self._batch_in_progress = max(0, self._batch_in_progress - 1)
         except asyncio.CancelledError:
             for task in tasks:
                 task.cancel()
@@ -201,6 +236,7 @@ class BatchManager:
             batch.status = "cancelled"
             batch.completed_at = utc_timestamp()
             self.storage.save_batch(batch)
+            self._batch_in_progress = max(0, self._batch_in_progress - 1)
             raise
         finally:
             final_batch = self.storage.get_batch(batch_id)
@@ -271,32 +307,42 @@ class BatchManager:
         self._set_retry_metadata(batch_id, scheduled=len(timeout_items), succeeded=0, failed=0)
         retry_succeeded = 0
         retry_failed = 0
-        for item in timeout_items:
-            batch = self.storage.get_batch(batch_id)
-            if batch.status == "cancelling":
-                break
-            try:
-                result = await self.runtime.run_batch(item.inference_request)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                retry_failed += 1
-                await self._record_error(
+        results_lock = asyncio.Lock()
+        max_concurrent = self.runtime.settings.batch_max_parallel + self.runtime.settings.batch_queue_limit
+        limiter = asyncio.Semaphore(max_concurrent)
+
+        async def _retry_one(item: _DeferredBatchTimeout) -> None:
+            nonlocal retry_succeeded, retry_failed
+            async with limiter:
+                batch = self.storage.get_batch(batch_id)
+                if batch.status == "cancelling":
+                    return
+                try:
+                    result = await self.runtime.run_batch(item.inference_request)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    async with results_lock:
+                        retry_failed += 1
+                    await self._record_error(
+                        batch_id=batch_id,
+                        custom_id=item.custom_id,
+                        message=str(exc),
+                        update_progress=False,
+                    )
+                    return
+                async with results_lock:
+                    retry_succeeded += 1
+                await self._record_success(
                     batch_id=batch_id,
                     custom_id=item.custom_id,
-                    message=str(exc),
+                    include_reasoning=item.include_reasoning,
+                    result=result,
                     update_progress=False,
                 )
-                continue
 
-            retry_succeeded += 1
-            await self._record_success(
-                batch_id=batch_id,
-                custom_id=item.custom_id,
-                include_reasoning=item.include_reasoning,
-                result=result,
-                update_progress=False,
-            )
+        tasks = [asyncio.create_task(_retry_one(item)) for item in timeout_items]
+        await asyncio.gather(*tasks)
 
         self._set_retry_metadata(
             batch_id,
