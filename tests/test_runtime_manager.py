@@ -177,6 +177,34 @@ def test_runtime_manager_background_self_test_does_not_consume_foreground_slots(
     assert text == "ok"
 
 
+def test_runtime_manager_uses_backend_specific_default_model(tmp_path):
+    settings = make_settings(
+        tmp_path,
+        INFERENCE_BACKEND="vllm",
+        DEFAULT_MODEL_ID="mock/default",
+        VLLM_DEFAULT_MODEL_ID="mock/reasoning",
+    )
+
+    async def factory(model_id: str) -> ModelBackend:
+        return TrackingBackend(model_id, delay=0.01)
+
+    async def scenario():
+        runtime = RuntimeManager(settings, backend_factory=factory)
+        await runtime.startup()
+        selected_model = runtime.resolve_model(None)
+        loaded_model = runtime.health_snapshot()["model_id"]
+        await asyncio.sleep(0.05)
+        self_test = runtime.health_snapshot()["startup_self_test"]
+        await runtime.shutdown()
+        return selected_model, loaded_model, self_test
+
+    selected_model, loaded_model, self_test = asyncio.run(scenario())
+    assert selected_model == "mock/reasoning"
+    assert loaded_model == "mock/reasoning"
+    assert self_test["model_id"] == "mock/reasoning"
+    assert self_test["status"] == "passed"
+
+
 def test_runtime_manager_logs_background_self_test_failure(tmp_path, caplog):
     settings = make_settings(tmp_path)
 

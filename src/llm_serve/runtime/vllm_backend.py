@@ -130,6 +130,7 @@ class VLLMModelBackend(ModelBackend):
                 dtype=self._settings.vllm_dtype,
                 tokenizer_mode=self._settings.vllm_tokenizer_mode,
                 trust_remote_code=self._settings.vllm_trust_remote_code,
+                enforce_eager=self._settings.vllm_enforce_eager,
                 tensor_parallel_size=self._settings.vllm_gpu_count,
                 gpu_memory_utilization=self._effective_gpu_memory_utilization,
             )

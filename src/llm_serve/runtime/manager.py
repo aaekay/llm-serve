@@ -61,9 +61,10 @@ class RuntimeManager:
             logger.info("Startup default-model load is disabled; skipping startup self-test.")
             return
 
-        logger.info("Loading default model '%s' during startup.", self.settings.default_model_id)
-        await self.ensure_loaded(self.settings.default_model_id)
-        logger.info("Default model '%s' is ready.", self.settings.default_model_id)
+        default_model_id = self.settings.effective_default_model_id
+        logger.info("Loading default model '%s' during startup.", default_model_id)
+        await self.ensure_loaded(default_model_id)
+        logger.info("Default model '%s' is ready.", default_model_id)
         await self._start_startup_self_test()
 
     async def shutdown(self) -> None:
@@ -99,7 +100,7 @@ class RuntimeManager:
         return models
 
     def resolve_model(self, requested_model: Optional[str], reasoning_effort: Optional[str] = None) -> str:
-        model_id = requested_model or self.settings.default_model_id
+        model_id = requested_model or self.settings.effective_default_model_id
         if model_id not in self.settings.model_allowlist:
             raise BadRequestError("Model '%s' is not in MODEL_ALLOWLIST" % model_id)
         if reasoning_effort and model_id not in self.settings.reasoning_model_allowlist:
@@ -364,6 +365,7 @@ class RuntimeManager:
 
     async def _run_startup_self_test(self) -> None:
         prompt = self.settings.startup_self_test_prompt.strip()
+        default_model_id = self.settings.effective_default_model_id
         if not self.settings.startup_self_test_enabled:
             self._startup_self_test = StartupSelfTestResult(status="disabled", prompt=prompt or None)
             return
@@ -375,11 +377,11 @@ class RuntimeManager:
         self._startup_self_test = StartupSelfTestResult(
             status="running",
             prompt=prompt,
-            model_id=self.settings.default_model_id,
+            model_id=default_model_id,
             started_at=started_at.isoformat(),
         )
         request = InferenceRequest(
-            model_id=self.settings.default_model_id,
+            model_id=default_model_id,
             prompt=prompt,
             max_output_tokens=self.settings.startup_self_test_max_output_tokens,
             temperature=self.settings.default_temperature,
@@ -388,7 +390,7 @@ class RuntimeManager:
         )
         logger.info(
             "Startup self-test started for model '%s' with max_output_tokens=%s and prompt=%r",
-            self.settings.default_model_id,
+            default_model_id,
             self.settings.startup_self_test_max_output_tokens,
             _preview_text(prompt),
         )
@@ -400,12 +402,12 @@ class RuntimeManager:
             self._startup_self_test = StartupSelfTestResult(
                 status="failed",
                 prompt=prompt,
-                model_id=self.settings.default_model_id,
+                model_id=default_model_id,
                 started_at=started_at.isoformat(),
                 completed_at=completed_at.isoformat(),
                 error=str(exc),
             )
-            logger.exception("Startup self-test failed for model '%s'", self.settings.default_model_id)
+            logger.exception("Startup self-test failed for model '%s'", default_model_id)
             raise
 
         latency_seconds = max(time.perf_counter() - started, 1e-9)
@@ -414,7 +416,7 @@ class RuntimeManager:
         self._startup_self_test = StartupSelfTestResult(
             status="passed",
             prompt=prompt,
-            model_id=self.settings.default_model_id,
+            model_id=default_model_id,
             started_at=started_at.isoformat(),
             completed_at=completed_at.isoformat(),
             latency_seconds=latency_seconds,
@@ -423,19 +425,20 @@ class RuntimeManager:
         )
         logger.info(
             "Startup self-test passed for model '%s': completion_tokens=%s latency=%.3fs tokens_per_second=%.2f",
-            self.settings.default_model_id,
+            default_model_id,
             result.completion_tokens,
             latency_seconds,
             tokens_per_second,
         )
         logger.info(
             "Startup self-test output for model '%s':\n%s",
-            self.settings.default_model_id,
+            default_model_id,
             result.text,
         )
 
     async def _start_startup_self_test(self) -> None:
         prompt = self.settings.startup_self_test_prompt.strip()
+        default_model_id = self.settings.effective_default_model_id
         if not self.settings.startup_self_test_enabled:
             self._startup_self_test = StartupSelfTestResult(status="disabled", prompt=prompt or None)
             logger.info("Startup self-test is disabled.")
@@ -447,7 +450,7 @@ class RuntimeManager:
         if self.settings.startup_self_test_blocking:
             logger.info(
                 "Startup self-test is running in blocking mode for model '%s'.",
-                self.settings.default_model_id,
+                default_model_id,
             )
             await self._run_startup_self_test()
             return
@@ -455,11 +458,11 @@ class RuntimeManager:
         self._startup_self_test = StartupSelfTestResult(
             status="queued",
             prompt=prompt,
-            model_id=self.settings.default_model_id,
+            model_id=default_model_id,
         )
         logger.info(
             "Startup self-test queued for model '%s' with max_output_tokens=%s and prompt=%r",
-            self.settings.default_model_id,
+            default_model_id,
             self.settings.startup_self_test_max_output_tokens,
             _preview_text(prompt),
         )

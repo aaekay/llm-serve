@@ -10,6 +10,7 @@
 - `INFERENCE_BACKEND=vllm` serves Hugging Face models directly through the local vLLM runtime.
 - `INFERENCE_BACKEND=ollama` treats Ollama as an already-running upstream service and proxies inference, optional pulls, and model tags to `OLLAMA_BASE_URL`.
 - `INFERENCE_BACKEND=mock` exists only for tests and lightweight local verification.
+- Default-model precedence is backend-aware: `VLLM_DEFAULT_MODEL_ID` overrides `DEFAULT_MODEL_ID` in `vllm`, `OLLAMA_DEFAULT_MODEL_ID` overrides it in `ollama`, and `mock` uses `DEFAULT_MODEL_ID`.
 
 ## GPU Configuration
 
@@ -31,6 +32,7 @@
 ## Startup Self-Test
 
 - After the default model is loaded, the runtime can run a configured startup prompt to verify real generation.
+- The startup/default-request model is the effective backend-specific default, not always the raw `DEFAULT_MODEL_ID`.
 - The default prompt is a thousand-word poem request so generation health is tested with a non-trivial output.
 - By default the self-test is launched in the background, so FastAPI startup completes after model load and `/healthz` reports `queued`, `running`, `passed`, or `failed`.
 - The runtime records completion tokens, latency, and tokens-per-second and exposes them via `/healthz`.

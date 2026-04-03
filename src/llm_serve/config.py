@@ -57,6 +57,8 @@ class Settings:
     port: int
     inference_backend: str
     default_model_id: str
+    vllm_default_model_id: Optional[str]
+    ollama_default_model_id: Optional[str]
     model_allowlist: List[str]
     reasoning_model_allowlist: List[str]
     prompt_max_parallel: int
@@ -79,6 +81,7 @@ class Settings:
     vllm_dtype: str
     vllm_tokenizer_mode: str
     vllm_trust_remote_code: bool
+    vllm_enforce_eager: bool
     vllm_gpu_auto_select: bool
     cuda_visible_devices: Optional[str]
     vllm_gpu_count: int
@@ -112,6 +115,8 @@ class Settings:
         model_allowlist = _parse_csv(env_source.get("MODEL_ALLOWLIST", "mock/default,mock/reasoning"))
         reasoning_allowlist = _parse_csv(env_source.get("REASONING_MODEL_ALLOWLIST", "mock/reasoning"))
         default_model_id = env_source.get("DEFAULT_MODEL_ID", model_allowlist[0] if model_allowlist else "")
+        vllm_default_model_id = _optional_str(env_source.get("VLLM_DEFAULT_MODEL_ID"))
+        ollama_default_model_id = _optional_str(env_source.get("OLLAMA_DEFAULT_MODEL_ID"))
         model_cache_dir = _optional_str(env_source.get("MODEL_CACHE_DIR")) or "data/models"
 
         settings = cls(
@@ -119,6 +124,8 @@ class Settings:
             port=int(env_source.get("PORT", "11424")),
             inference_backend=env_source.get("INFERENCE_BACKEND", "mock").strip().lower(),
             default_model_id=default_model_id,
+            vllm_default_model_id=vllm_default_model_id,
+            ollama_default_model_id=ollama_default_model_id,
             model_allowlist=model_allowlist,
             reasoning_model_allowlist=reasoning_allowlist,
             prompt_max_parallel=int(env_source.get("PROMPT_MAX_PARALLEL", "8")),
@@ -160,6 +167,10 @@ class Settings:
             vllm_trust_remote_code=_parse_bool(
                 env_source.get("VLLM_TRUST_REMOTE_CODE", "false"),
                 "VLLM_TRUST_REMOTE_CODE",
+            ),
+            vllm_enforce_eager=_parse_bool(
+                env_source.get("VLLM_ENFORCE_EAGER", "false"),
+                "VLLM_ENFORCE_EAGER",
             ),
             vllm_gpu_auto_select=_parse_bool(
                 env_source.get("VLLM_GPU_AUTO_SELECT", "true"),
@@ -228,14 +239,33 @@ class Settings:
     def transformers_cache(self) -> Path:
         return self.model_cache_dir / "transformers"
 
+    @property
+    def effective_default_model_id(self) -> str:
+        if self.inference_backend == "vllm" and self.vllm_default_model_id:
+            return self.vllm_default_model_id
+        if self.inference_backend == "ollama" and self.ollama_default_model_id:
+            return self.ollama_default_model_id
+        return self.default_model_id
+
+    @property
+    def effective_default_model_env_var(self) -> str:
+        if self.inference_backend == "vllm" and self.vllm_default_model_id:
+            return "VLLM_DEFAULT_MODEL_ID"
+        if self.inference_backend == "ollama" and self.ollama_default_model_id:
+            return "OLLAMA_DEFAULT_MODEL_ID"
+        return "DEFAULT_MODEL_ID"
+
     def validate(self) -> None:
         if not self.model_allowlist:
             raise ValueError("MODEL_ALLOWLIST must not be empty")
-        if self.default_model_id not in self.model_allowlist:
-            raise ValueError(
-                "DEFAULT_MODEL_ID '%s' must be present in MODEL_ALLOWLIST (%s)"
-                % (self.default_model_id, ", ".join(self.model_allowlist))
-            )
+        if self.vllm_default_model_id is not None:
+            self._validate_allowed_default_model(self.vllm_default_model_id, "VLLM_DEFAULT_MODEL_ID")
+        if self.ollama_default_model_id is not None:
+            self._validate_allowed_default_model(self.ollama_default_model_id, "OLLAMA_DEFAULT_MODEL_ID")
+        self._validate_allowed_default_model(
+            self.effective_default_model_id,
+            self.effective_default_model_env_var,
+        )
         if not set(self.reasoning_model_allowlist).issubset(set(self.model_allowlist)):
             raise ValueError("REASONING_MODEL_ALLOWLIST must be a subset of MODEL_ALLOWLIST")
         if self.prompt_max_parallel < 1:
@@ -287,3 +317,10 @@ class Settings:
             raise ValueError("CUDA_VISIBLE_DEVICES must list at least one device when set")
         if not self.vllm_gpu_auto_select and visible_devices and self.vllm_gpu_count > len(visible_devices):
             raise ValueError("VLLM_GPU_COUNT cannot exceed the number of CUDA_VISIBLE_DEVICES entries")
+
+    def _validate_allowed_default_model(self, model_id: str, env_var_name: str) -> None:
+        if model_id not in self.model_allowlist:
+            raise ValueError(
+                "%s '%s' must be present in MODEL_ALLOWLIST (%s)"
+                % (env_var_name, model_id, ", ".join(self.model_allowlist))
+            )

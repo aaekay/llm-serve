@@ -74,3 +74,15 @@
 - Result: `18 passed in 1.12s`.
 - Ran `uv run pytest -q`.
 - Result: `43 passed in 1.15s`.
+
+## Backend-Specific Default Models
+
+- [x] Add `VLLM_DEFAULT_MODEL_ID` and `OLLAMA_DEFAULT_MODEL_ID` with `DEFAULT_MODEL_ID` kept as a compatibility fallback.
+- [x] Make startup loading, omitted-model request fallback, and startup self-test use the effective backend-specific default model.
+- [x] Update env/docs comments and add config/runtime/app coverage for backend-specific default selection and validation.
+
+- Verification:
+- Ran `uv run pytest -q tests/test_config.py tests/test_runtime_manager.py tests/test_ollama_app.py tests/test_app.py`.
+- Result: `28 passed in 1.32s`.
+- Ran `uv run pytest -q`.
+- Result: `49 passed in 1.47s`.

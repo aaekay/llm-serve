@@ -25,11 +25,13 @@ def test_settings_loads_csv_and_boolean_fields(tmp_path):
     assert settings.startup_load_default_model is False
     assert settings.startup_self_test_blocking is True
     assert settings.vllm_trust_remote_code is True
+    assert settings.vllm_enforce_eager is False
     assert settings.vllm_gpu_auto_select is False
     assert settings.ollama_base_url == "http://127.0.0.1:11434"
     assert settings.ollama_request_timeout_seconds == 120
     assert settings.ollama_request_timeout_retry_enabled is True
     assert settings.ollama_request_timeout_retry_multiplier == 2.0
+    assert settings.effective_default_model_id == "mock/default"
 
 
 def test_settings_rejects_invalid_default_model(tmp_path):
@@ -44,6 +46,93 @@ def test_settings_rejects_invalid_default_model(tmp_path):
                 "MODEL_ALLOWLIST": "mock/default",
             },
         )
+
+
+def test_settings_resolve_backend_specific_default_model_ids(tmp_path):
+    vllm_settings = Settings.load(
+        base_dir=tmp_path,
+        environ={
+            "DEFAULT_MODEL_ID": "mock/default",
+            "VLLM_DEFAULT_MODEL_ID": "mock/reasoning",
+            "MODEL_ALLOWLIST": "mock/default,mock/reasoning",
+            "REASONING_MODEL_ALLOWLIST": "mock/reasoning",
+            "INFERENCE_BACKEND": "vllm",
+        },
+    )
+    ollama_settings = Settings.load(
+        base_dir=tmp_path,
+        environ={
+            "DEFAULT_MODEL_ID": "mock/default",
+            "OLLAMA_DEFAULT_MODEL_ID": "mock/reasoning",
+            "MODEL_ALLOWLIST": "mock/default,mock/reasoning",
+            "REASONING_MODEL_ALLOWLIST": "mock/reasoning",
+            "INFERENCE_BACKEND": "ollama",
+        },
+    )
+
+    assert vllm_settings.effective_default_model_id == "mock/reasoning"
+    assert ollama_settings.effective_default_model_id == "mock/reasoning"
+
+
+def test_settings_allow_active_backend_override_to_replace_invalid_fallback(tmp_path):
+    settings = Settings.load(
+        base_dir=tmp_path,
+        environ={
+            "DEFAULT_MODEL_ID": "missing/model",
+            "VLLM_DEFAULT_MODEL_ID": "mock/default",
+            "MODEL_ALLOWLIST": "mock/default,mock/reasoning",
+            "REASONING_MODEL_ALLOWLIST": "mock/reasoning",
+            "INFERENCE_BACKEND": "vllm",
+        },
+    )
+
+    assert settings.effective_default_model_id == "mock/default"
+
+
+def test_settings_reject_invalid_vllm_default_model(tmp_path):
+    with pytest.raises(
+        ValueError,
+        match=r"VLLM_DEFAULT_MODEL_ID 'missing/model' must be present in MODEL_ALLOWLIST \(mock/default\)",
+    ):
+        Settings.load(
+            base_dir=tmp_path,
+            environ={
+                "DEFAULT_MODEL_ID": "mock/default",
+                "VLLM_DEFAULT_MODEL_ID": "missing/model",
+                "MODEL_ALLOWLIST": "mock/default",
+                "INFERENCE_BACKEND": "vllm",
+            },
+        )
+
+
+def test_settings_reject_invalid_ollama_default_model(tmp_path):
+    with pytest.raises(
+        ValueError,
+        match=r"OLLAMA_DEFAULT_MODEL_ID 'missing/model' must be present in MODEL_ALLOWLIST \(mock/default\)",
+    ):
+        Settings.load(
+            base_dir=tmp_path,
+            environ={
+                "DEFAULT_MODEL_ID": "mock/default",
+                "OLLAMA_DEFAULT_MODEL_ID": "missing/model",
+                "MODEL_ALLOWLIST": "mock/default",
+                "INFERENCE_BACKEND": "ollama",
+            },
+        )
+
+
+def test_settings_parses_vllm_enforce_eager(tmp_path):
+    settings = Settings.load(
+        base_dir=tmp_path,
+        environ={
+            "DEFAULT_MODEL_ID": "mock/default",
+            "MODEL_ALLOWLIST": "mock/default,mock/reasoning",
+            "REASONING_MODEL_ALLOWLIST": "mock/reasoning",
+            "VLLM_ENFORCE_EAGER": "true",
+        },
+    )
+
+    assert settings.vllm_enforce_eager is True
 
 
 def test_settings_reject_startup_self_test_tokens_above_max_output_tokens(tmp_path):

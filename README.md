@@ -6,7 +6,7 @@ See [api_usage.md](api_usage.md) for the external API contract and [docs/codeflo
 
 ## Quickstart
 
-1. Copy `.env.example` to `.env` and adjust `INFERENCE_BACKEND`, `DEFAULT_MODEL_ID`, and the allowlisted model IDs you want to serve.
+1. Copy `.env.example` to `.env` and adjust `INFERENCE_BACKEND`, the default model env vars for your backend, and the allowlisted model IDs you want to serve.
 2. Install the project:
    - vLLM runtime plus tests: `uv sync --extra runtime --extra dev`
    - Ollama or mock runtime plus tests: `uv sync --extra dev`
@@ -21,10 +21,11 @@ The default mock-safe code path exists to keep tests lightweight. For real model
 - Batch uploads, metadata, and generated outputs are stored under `STORAGE_ROOT`.
 - In `vllm` mode, model downloads and Hugging Face cache files are stored under `MODEL_CACHE_DIR`, which defaults to the repo-local `data/models/`.
 - In `ollama` mode, `llm-serve` treats Ollama as an already-running upstream service. It proxies inference, model tags, and optional `/api/pull` calls to `OLLAMA_BASE_URL` and does not host models or use Hugging Face/vLLM GPU settings locally.
+- `VLLM_DEFAULT_MODEL_ID` and `OLLAMA_DEFAULT_MODEL_ID` let each backend use its own startup/request default model. If a backend-specific value is unset, `DEFAULT_MODEL_ID` is used as the fallback.
 - Direct non-batch Ollama requests use `OLLAMA_REQUEST_TIMEOUT_SECONDS` and can retry once with `OLLAMA_REQUEST_TIMEOUT_RETRY_MULTIPLIER` before returning a timeout.
 - Timed-out Ollama batch items do not fail the whole batch immediately. `llm-serve` retries them once after the first pass using `OLLAMA_BATCH_TIMEOUT_RETRY_MULTIPLIER` and `OLLAMA_BATCH_RETRY_OUTPUT_TOKENS_MULTIPLIER`, then writes the final consolidated result into the original batch artifacts.
 - On startup, the service can run a self-test prompt such as a thousand-word poem after the default model loads. By default this runs in the background so the API becomes ready after model load, and `/healthz` reports `queued`, `running`, `passed`, or `failed` along with completion tokens, latency, and tokens-per-second.
-- Startup logs also show when the default model load begins, when the self-test is queued or started, and whether it passed or failed. If `DEFAULT_MODEL_ID` is misconfigured, startup fails with the bad model ID and the current allowlist in the error text.
+- Startup logs also show when the effective default model load begins, when the self-test is queued or started, and whether it passed or failed. If the selected default-model env var is misconfigured, startup fails with the bad model ID and the current allowlist in the error text.
 - Set `STARTUP_SELF_TEST_BLOCKING=true` if you want startup readiness to wait for that generation to finish and fail fast on a broken generation path.
 - `VLLM_GPU_AUTO_SELECT=true` makes the first vLLM model load inspect all host GPUs with `nvidia-smi`, choose the best `VLLM_GPU_COUNT` GPUs by free memory, and set `CUDA_VISIBLE_DEVICES` automatically.
 - `VLLM_GPU_MEMORY_UTILIZATION` is a preferred cap, not a fixed requirement. If the selected GPUs cannot safely support that value, the server derives a lower `gpu_memory_utilization` from current free memory, `VLLM_GPU_MEMORY_RESERVE_FRACTION`, and `VLLM_GPU_MEMORY_UTILIZATION_MIN`.

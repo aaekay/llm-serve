@@ -140,6 +140,37 @@ def test_ollama_backend_preserves_chat_tags_and_pull_api(tmp_path, monkeypatch):
     assert [model["model"] for model in refreshed_tags.json()["models"]] == ["mock/default", "mock/reasoning"]
 
 
+def test_ollama_backend_uses_ollama_default_model_override(tmp_path, monkeypatch):
+    _patch_fake_ollama(monkeypatch)
+    FakeOllamaAPIClient.installed_models = {"mock/default", "mock/reasoning"}
+    FakeOllamaAPIClient.pulled_models = []
+    FakeOllamaAPIClient.generated_requests = []
+    settings = make_settings(
+        tmp_path,
+        INFERENCE_BACKEND="ollama",
+        DEFAULT_MODEL_ID="mock/default",
+        OLLAMA_DEFAULT_MODEL_ID="mock/reasoning",
+        STARTUP_SELF_TEST_ENABLED="false",
+    )
+
+    with TestClient(create_app(settings)) as client:
+        health = client.get("/healthz")
+        assert health.status_code == 200
+        assert health.json()["model_id"] == "mock/reasoning"
+
+        completion = client.post(
+            "/v1/chat/completions",
+            json={
+                "messages": [{"role": "user", "content": "Use the ollama default"}],
+                "stream": False,
+            },
+        )
+
+    assert completion.status_code == 200
+    assert completion.json()["model"] == "mock/reasoning"
+    assert "ollama-response[mock/reasoning]" in completion.json()["choices"][0]["message"]["content"]
+
+
 def test_ollama_backend_supports_batch_jobs(tmp_path, monkeypatch):
     _patch_fake_ollama(monkeypatch)
     FakeOllamaAPIClient.installed_models = {"mock/default"}
