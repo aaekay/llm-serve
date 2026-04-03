@@ -38,6 +38,7 @@ def make_settings(tmp_path: Path, **overrides: Any) -> Settings:
         "VLLM_GPU_MEMORY_UTILIZATION": "0.9",
         "VLLM_GPU_MEMORY_UTILIZATION_MIN": "0.5",
         "VLLM_GPU_MEMORY_RESERVE_FRACTION": "0.05",
+        "VLLM_DISABLE_CUSTOM_ALL_REDUCE": "true",
         "OLLAMA_BASE_URL": "http://127.0.0.1:11434",
         "OLLAMA_REQUEST_TIMEOUT_SECONDS": "5",
         "OLLAMA_REQUEST_TIMEOUT_RETRY_ENABLED": "true",

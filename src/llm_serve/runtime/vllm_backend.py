@@ -52,6 +52,15 @@ class VLLMModelBackend(ModelBackend):
         self._engine = None
         if engine is None:
             return
+        # vLLM v1 exposes engine.shutdown(timeout=...); older builds used shutdown_background_loop().
+        # Calling the full shutdown path tears down EngineCore / worker procs and releases GPU memory.
+        shutdown_fn = getattr(engine, "shutdown", None)
+        if callable(shutdown_fn):
+            try:
+                await asyncio.to_thread(shutdown_fn, 180.0)
+            except Exception as exc:
+                logger.warning("vLLM engine shutdown failed: %s", exc)
+            return
         shutdown_background_loop = getattr(engine, "shutdown_background_loop", None)
         if callable(shutdown_background_loop):
             shutdown_background_loop()
@@ -133,6 +142,11 @@ class VLLMModelBackend(ModelBackend):
                 enforce_eager=self._settings.vllm_enforce_eager,
                 tensor_parallel_size=self._settings.vllm_gpu_count,
                 gpu_memory_utilization=self._effective_gpu_memory_utilization,
+                max_model_len=self._settings.vllm_max_model_len,
+                language_model_only=self._settings.vllm_language_model_only,
+                skip_mm_profiling=self._settings.vllm_language_model_only,
+                gdn_prefill_backend=self._settings.vllm_gdn_prefill_backend,
+                disable_custom_all_reduce=self._settings.vllm_disable_custom_all_reduce,
             )
             try:
                 self._engine = AsyncLLMEngine.from_engine_args(engine_args)
@@ -198,6 +212,7 @@ class VLLMModelBackend(ModelBackend):
         os.environ["HUGGINGFACE_HUB_CACHE"] = str(self._settings.huggingface_hub_cache)
         os.environ["TRANSFORMERS_CACHE"] = str(self._settings.transformers_cache)
         os.environ["VLLM_USE_V1"] = "1" if self._settings.vllm_use_v1 else "0"
+        os.environ.setdefault("VLLM_SKIP_GDN_WARMUP", "1")
         if self._effective_cuda_visible_devices is None:
             return
         os.environ["CUDA_VISIBLE_DEVICES"] = self._effective_cuda_visible_devices

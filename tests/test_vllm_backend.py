@@ -38,7 +38,7 @@ def test_vllm_backend_applies_cuda_visible_devices_and_tensor_parallel_size(tmp_
             captured["engine_args"] = kwargs
 
     class FakeEngine:
-        def shutdown_background_loop(self):
+        def shutdown(self, timeout=None):
             captured["shutdown"] = True
 
     class FakeAsyncLLMEngine:
@@ -87,6 +87,7 @@ def test_vllm_backend_applies_cuda_visible_devices_and_tensor_parallel_size(tmp_
     assert captured["engine_args"]["model"] == "mock/reasoning"
     assert captured["engine_args"]["tensor_parallel_size"] == 2
     assert captured["engine_args"]["gpu_memory_utilization"] == pytest.approx(0.9)
+    assert captured["engine_args"]["disable_custom_all_reduce"] is True
 
 
 def test_vllm_backend_auto_selects_best_gpus_and_derives_utilization(tmp_path, monkeypatch):
@@ -97,7 +98,7 @@ def test_vllm_backend_auto_selects_best_gpus_and_derives_utilization(tmp_path, m
             captured["engine_args"] = kwargs
 
     class FakeEngine:
-        def shutdown_background_loop(self):
+        def shutdown(self, timeout=None):
             captured["shutdown"] = True
 
     class FakeAsyncLLMEngine:
@@ -164,7 +165,7 @@ def test_vllm_backend_auto_select_uses_preferred_utilization_when_available(tmp_
             captured["engine_args"] = kwargs
 
     class FakeEngine:
-        def shutdown_background_loop(self):
+        def shutdown(self, timeout=None):
             return None
 
     class FakeAsyncLLMEngine:
@@ -305,7 +306,7 @@ def test_vllm_backend_sets_vllm_use_v1_env_var(tmp_path, monkeypatch):
             captured["engine_args"] = kwargs
 
     class FakeEngine:
-        def shutdown_background_loop(self):
+        def shutdown(self, timeout=None):
             return None
 
     class FakeAsyncLLMEngine:

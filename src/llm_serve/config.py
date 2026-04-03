@@ -83,6 +83,10 @@ class Settings:
     vllm_trust_remote_code: bool
     vllm_enforce_eager: bool
     vllm_use_v1: bool
+    vllm_language_model_only: bool
+    vllm_max_model_len: Optional[int]
+    vllm_gdn_prefill_backend: Optional[str]
+    vllm_disable_custom_all_reduce: bool
     vllm_gpu_auto_select: bool
     cuda_visible_devices: Optional[str]
     vllm_gpu_count: int
@@ -176,6 +180,22 @@ class Settings:
             vllm_use_v1=_parse_bool(
                 env_source.get("VLLM_USE_V1", "false"),
                 "VLLM_USE_V1",
+            ),
+            vllm_language_model_only=_parse_bool(
+                env_source.get("VLLM_LANGUAGE_MODEL_ONLY", "false"),
+                "VLLM_LANGUAGE_MODEL_ONLY",
+            ),
+            vllm_max_model_len=(
+                int(env_source["VLLM_MAX_MODEL_LEN"])
+                if _optional_str(env_source.get("VLLM_MAX_MODEL_LEN")) is not None
+                else None
+            ),
+            vllm_gdn_prefill_backend=_optional_str(
+                env_source.get("VLLM_GDN_PREFILL_BACKEND")
+            ),
+            vllm_disable_custom_all_reduce=_parse_bool(
+                env_source.get("VLLM_DISABLE_CUSTOM_ALL_REDUCE", "true"),
+                "VLLM_DISABLE_CUSTOM_ALL_REDUCE",
             ),
             vllm_gpu_auto_select=_parse_bool(
                 env_source.get("VLLM_GPU_AUTO_SELECT", "true"),
@@ -309,6 +329,10 @@ class Settings:
             return
         if self.vllm_gpu_count < 1:
             raise ValueError("VLLM_GPU_COUNT must be at least 1")
+        if self.vllm_max_model_len is not None and self.vllm_max_model_len < 1:
+            raise ValueError("VLLM_MAX_MODEL_LEN must be at least 1 when set")
+        if self.vllm_gdn_prefill_backend not in {None, "triton", "flashinfer"}:
+            raise ValueError("VLLM_GDN_PREFILL_BACKEND must be 'triton', 'flashinfer', or empty")
         if not 0 < self.vllm_gpu_memory_utilization <= 1:
             raise ValueError("VLLM_GPU_MEMORY_UTILIZATION must be between 0 and 1")
         if not 0 < self.vllm_gpu_memory_utilization_min <= 1:
