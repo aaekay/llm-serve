@@ -31,7 +31,7 @@ class ServiceError(Exception):
         return payload
 
     def to_ollama_error(self) -> Dict[str, Any]:
-        payload = {"error": self.message}
+        payload: Dict[str, Any] = {"error": self.message}
         payload.update(self.extra)
         return payload
 

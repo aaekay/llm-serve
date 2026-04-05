@@ -8,3 +8,4 @@
 - When a startup self-test uses a real long-form generation, do not block API readiness on it by default; run it in the background and expose progress in health data, with blocking mode only as an opt-in.
 - When a backend is already hosted by another process, do not over-focus on local model hosting semantics; center the design on upstream timeout handling, retries, and batch orchestration instead.
 - When a background startup check matters operationally, do not rely on `/healthz` alone; log queue/start/pass/fail transitions and include offending values in config validation errors.
+- When a user reports poor throughput or doubts parallelism, do not infer from semaphore code alone; benchmark direct upstream vs proxy behavior and expose live active-slot metrics so overlap can be observed in production.

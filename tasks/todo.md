@@ -86,3 +86,63 @@
 - Result: `28 passed in 1.32s`.
 - Ran `uv run pytest -q`.
 - Result: `49 passed in 1.47s`.
+
+## Launcher Compatibility
+
+- [x] Reproduce the `run-server.sh` failure and confirm whether it comes from the wrapper or the app.
+- [x] Remove the forced `uv run --extra runtime` path from the shell launcher so non-vLLM backends do not resolve incompatible vLLM dependencies at startup.
+- [x] Verify the launcher still starts successfully in a backend mode that does not require the vLLM extra.
+- [x] Update launcher documentation and record the verification result.
+
+- Verification:
+- Reproduced the old launcher failure with `./run-server.sh --help`, which failed during `uv` resolution on macOS arm64 because the forced `runtime` extra pulled `nvidia-cudnn-frontend==1.18.0`, a package without a compatible wheel for this platform.
+- Verified the updated launcher with `PORT=11425 INFERENCE_BACKEND=mock STARTUP_LOAD_DEFAULT_MODEL=false ./run-server.sh`; the server started successfully and shut down cleanly on interrupt.
+- Ran `bash -n run-server.sh`.
+- Result: shell syntax check passed.
+
+## Throughput Diagnostics
+
+- [x] Reproduce current generation speed through both direct Ollama and the llm-serve proxy.
+- [x] Check whether concurrent requests overlap in practice or serialize completely.
+- [x] Add runtime health visibility for active foreground and batch slots.
+- [x] Run focused tests for the new health snapshot fields and record the results.
+- [x] Update docs with guidance on interpreting concurrency metrics and tuning large Ollama-backed models.
+
+- Verification:
+- Ran `uv run pytest -q tests/test_runtime_manager.py tests/test_app.py tests/test_ollama_app.py`.
+- Result: `19 passed in 1.66s`.
+- Benchmarked direct Ollama vs the llm-serve proxy against `gpt-oss:120b` with a 256-token `/api/generate` request.
+- Direct single request: `2.706s`, `94.61` aggregate tokens/sec.
+- Proxy single request: `2.712s`, `94.41` aggregate tokens/sec.
+- Direct parallel 3 requests: `7.028s` wall clock, `109.28` aggregate tokens/sec.
+- Proxy parallel 3 requests: `6.858s` wall clock, `111.98` aggregate tokens/sec.
+- Verified the new live concurrency fields on the real server: during three overlapping requests, `/healthz` reported `foreground_active=3`, `foreground_capacity=8`, `queue_depth=0`, `batch_active=0`.
+
+## Qwen vLLM API Alignment
+
+- [x] Align the canonical Qwen 27B model ID across config, docs, and launchers.
+- [x] Make `run-server.sh` the documented API entrypoint and keep `run-qwen35-27b.sh` as direct vLLM debugging only.
+- [x] Implement model-native chat templating for vLLM-backed chat requests instead of flattening messages into a plain prompt.
+- [x] Make vLLM reasoning behavior explicit and API-compatible for Qwen requests, including hidden reasoning by default and optional extraction in non-stream responses.
+- [x] Add `Retry-After` headers to `202` spin-up responses and tighten schema/API validation drift.
+- [x] Update docs and `.env.example` for the 2-GPU Qwen vLLM path, concurrency tuning, and backend-specific reasoning behavior.
+- [x] Run focused tests plus full verification and record the results.
+
+- Verification:
+- Switched the vLLM chat path to tokenizer-backed chat templating and reasoning extraction, with streamed output stripped down to answer content only.
+- Propagated chat messages through batch inference requests so the vLLM backend can apply the same chat-template path outside direct API calls.
+- Added `Retry-After` headers to `202` spin-up responses and tightened request validation so `top_p=0` and `tool` messages are rejected consistently with the docs.
+- Aligned the canonical Qwen model ID to `Qwen/Qwen3.5-27B` across `.env.example`, the direct Qwen launcher, docs, and examples.
+- Changed the vLLM text-only default to `VLLM_LANGUAGE_MODEL_ONLY=true` and documented the 2-GPU Qwen baseline config, including `VLLM_MAX_MODEL_LEN=8192` in `.env.example`.
+- Updated the user-facing docs to make `run-server.sh` the canonical API entrypoint and `run-qwen35-27b.sh` the direct vLLM debug launcher.
+- Added a dedicated [`docs/qwen-vllm.md`](../docs/qwen-vllm.md) reference for 2-GPU Qwen startup and tuning notes.
+- Ran `uv run pytest -q tests/test_vllm_backend.py tests/test_app.py tests/test_ollama_app.py tests/test_runtime_manager.py tests/test_config.py`.
+- Result: `44 passed in 1.67s`.
+- Ran `uv run pytest -q`.
+- Result: `58 passed in 1.67s`.
+- Ran `bash -n run-server.sh` and `bash -n run-qwen35-27b.sh`.
+- Result: both shell syntax checks passed.
+- Ran `git diff --check`.
+- Result: no diff formatting issues.
+- Verified the launcher smoke test with `PORT=18425 INFERENCE_BACKEND=mock STARTUP_LOAD_DEFAULT_MODEL=false ./run-server.sh`.
+- Result: the server started successfully, reached application startup complete, and shut down cleanly on interrupt.

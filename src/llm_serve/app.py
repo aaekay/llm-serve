@@ -22,7 +22,7 @@ from llm_serve.schemas import (
     PullRequest,
 )
 from llm_serve.storage import StorageManager
-from llm_serve.tokenization import estimate_text_tokens, estimate_messages_tokens
+from llm_serve.tokenization import estimate_messages_tokens, estimate_text_tokens
 from llm_serve.types import InferenceRequest, InferenceResult, LoadStatus
 
 from .runtime.manager import RuntimeManager
@@ -73,9 +73,13 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             "loaded": snapshot["loaded"],
             "model_id": snapshot["model_id"],
             "inference_backend": snapshot["inference_backend"],
+            "foreground_active": snapshot["foreground_active"],
+            "foreground_capacity": snapshot["foreground_capacity"],
             "queue_depth": snapshot["queue_depth"],
             "batch_jobs_total": batch_total,
             "batch_jobs_in_progress": batch_in_progress,
+            "batch_active": snapshot["batch_active"],
+            "batch_capacity": snapshot["batch_capacity"],
             "batch_queue_depth": snapshot["batch_queue_depth"],
             "switch_in_progress": snapshot["switch_in_progress"],
             "switch_target_model": snapshot["switch_target_model"],
@@ -108,7 +112,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         if not load_status.ready:
             if load_status.state == "conflict":
                 raise ConflictError("Runtime is switching models", extra={"current_model": load_status.current_model})
-            return JSONResponse(status_code=202, content=_openai_load_response(load_status))
+            return _load_pending_json_response(load_status, _openai_load_response(load_status))
 
         if payload.stream:
             stream = _openai_stream(runtime, request_model)
@@ -171,7 +175,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         if not load_status.ready:
             if load_status.state == "conflict":
                 raise ConflictError("Runtime is switching models", extra={"current_model": load_status.current_model})
-            return JSONResponse(status_code=202, content=_ollama_load_response(load_status))
+            return _load_pending_json_response(load_status, _ollama_load_response(load_status))
 
         if payload.stream:
             return StreamingResponse(_ollama_chat_stream(runtime, request_model), media_type="application/x-ndjson")
@@ -202,7 +206,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         if not load_status.ready:
             if load_status.state == "conflict":
                 raise ConflictError("Runtime is switching models", extra={"current_model": load_status.current_model})
-            return JSONResponse(status_code=202, content=_ollama_load_response(load_status))
+            return _load_pending_json_response(load_status, _ollama_load_response(load_status))
 
         if payload.stream:
             return StreamingResponse(
@@ -223,7 +227,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         status = await runtime.pull_model(model_id)
         if status.ready:
             return {"status": "ready", "model": model_id}
-        return JSONResponse(status_code=202, content=_ollama_load_response(status))
+        return _load_pending_json_response(status, _ollama_load_response(status))
 
     return app
 
@@ -253,9 +257,17 @@ def _ollama_load_response(load_status: LoadStatus):
     }
 
 
+def _load_pending_json_response(load_status: LoadStatus, payload: dict) -> JSONResponse:
+    return JSONResponse(
+        status_code=202,
+        content=payload,
+        headers={"Retry-After": str(load_status.retry_after_seconds)},
+    )
+
+
 def _openai_completion_response(result: InferenceResult, include_reasoning: bool) -> JSONResponse:
     created = int(datetime.now(timezone.utc).timestamp())
-    message = {"role": "assistant", "content": result.text}
+    message: dict = {"role": "assistant", "content": result.text}
     if include_reasoning and result.reasoning:
         message["reasoning"] = result.reasoning
     payload = {

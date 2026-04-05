@@ -12,14 +12,19 @@ This server supports both API styles:
 ## 1) Start The Server
 
 ```bash
-llm-serve
+./run-server.sh
 ```
+
+This is the canonical API entrypoint for the full `llm-serve` surface.
+Use `run-qwen35-27b.sh` only when you want a raw `vllm serve` process for debugging or benchmarking.
 
 Backend notes:
 
-- `INFERENCE_BACKEND=vllm`: serves Hugging Face models directly through local vLLM.
+- `INFERENCE_BACKEND=vllm`: serves Hugging Face models directly through local vLLM using model-native chat templates.
 - `INFERENCE_BACKEND=ollama`: treats Ollama as an already-running upstream service at `OLLAMA_BASE_URL` while keeping the same `llm-serve` API surface, batching, and allowlist behavior.
 - In Ollama mode, direct non-batch requests can get one longer internal retry on upstream timeout before `llm-serve` returns an error.
+- For Qwen on `vllm`, the canonical model ID in this repo is `Qwen/Qwen3.5-27B`.
+- In `vllm` mode, `reasoning_effort` enables thinking mode for `Qwen/Qwen3.5-27B`. The `low`, `medium`, and `high` tiers currently share the same backend behavior, so treat them as request intent labels rather than distinct tuned profiles.
 
 ## 2) OpenAI-Compatible Usage (`/v1/*`)
 
@@ -42,8 +47,8 @@ Backend notes:
 - `stream` (optional, default `false`): `true` for SSE output
 - `temperature` (optional): `0.0` to `2.0`
 - `top_p` (optional): `>0.0` and `<=1.0`
-- `max_tokens` (optional): `1` to `8192`
-- `max_completion_tokens` (optional): `1` to `8192` (takes precedence over `max_tokens`)
+- `max_tokens` (optional): `1` to `MAX_OUTPUT_TOKENS` (server-configured cap; values above it are clamped)
+- `max_completion_tokens` (optional): `1` to `MAX_OUTPUT_TOKENS` (takes precedence over `max_tokens`; values above it are clamped)
 - `reasoning_effort` (optional): `low`, `medium`, or `high`
 - `include_reasoning` (optional, default `false`): include extracted reasoning text in non-stream response
 
@@ -54,13 +59,12 @@ Allowlist policy:
 
 ### Reasoning Requests (OpenAI)
 
-- Use `reasoning_effort` to request deeper reasoning:
-  - `low`: simple extraction/classification/short transformations
-  - `medium`: multi-step explanation and synthesis
-  - `high`: difficult edge-case reasoning (higher latency/token usage)
+- Use `reasoning_effort` to request thinking mode.
+- In `vllm` mode for `Qwen/Qwen3.5-27B`, `low`, `medium`, and `high` are accepted for API compatibility and all currently enable the same backend behavior.
 - `include_reasoning` defaults to `false`.
 - When `include_reasoning=false`, consume `choices[0].message.content` as the final answer.
 - When `include_reasoning=true` (non-stream), response may include `choices[0].message.reasoning`.
+- In `vllm` mode, Qwen requests may surface extracted reasoning in non-stream responses when `include_reasoning=true`. Streaming remains answer-only.
 
 Non-stream (reasoning enabled, reasoning hidden by default):
 
@@ -68,7 +72,7 @@ Non-stream (reasoning enabled, reasoning hidden by default):
 curl -s http://127.0.0.1:11424/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "Qwen/Qwen3-8B",
+    "model": "Qwen/Qwen3.5-27B",
     "messages": [{"role": "user", "content": "Compare two treatment options in 3 bullets."}],
     "reasoning_effort": "medium",
     "stream": false
@@ -81,7 +85,7 @@ Non-stream (reasoning enabled and included in output):
 curl -s http://127.0.0.1:11424/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "Qwen/Qwen3-8B",
+    "model": "Qwen/Qwen3.5-27B",
     "messages": [{"role": "user", "content": "Solve this step by step and then give final answer."}],
     "reasoning_effort": "high",
     "include_reasoning": true,
@@ -100,7 +104,7 @@ Streaming (reasoning enabled):
 curl -N http://127.0.0.1:11424/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "Qwen/Qwen3-8B",
+    "model": "Qwen/Qwen3.5-27B",
     "messages": [{"role": "user", "content": "Think carefully and answer in JSON."}],
     "reasoning_effort": "medium",
     "stream": true
@@ -173,7 +177,7 @@ client = OpenAI(
 )
 
 resp = client.chat.completions.create(
-    model="Qwen/Qwen3-8B",
+    model="Qwen/Qwen3.5-27B",
     messages=[{"role": "user", "content": "Analyze this and return 3 concise recommendations."}],
     stream=False,
     extra_body={
@@ -196,7 +200,7 @@ With model switching enabled, first request for an unloaded model can return `20
 {
   "object": "model.load",
   "status": "spinning_up",
-  "model": "meta-llama/Llama-3.1-8B-Instruct",
+  "model": "Qwen/Qwen3.5-27B",
   "current_model": "Qwen/Qwen2.5-7B-Instruct",
   "retry_after_seconds": 2,
   "eta_seconds": null
@@ -205,7 +209,7 @@ With model switching enabled, first request for an unloaded model can return `20
 
 When this happens:
 
-1. Wait for `retry_after_seconds` (or `Retry-After` header).
+1. Wait for `retry_after_seconds` or the `Retry-After` response header.
 2. Retry the same request.
 
 ### OpenAI Batch Workflow (`/v1/files`, `/v1/batches`)
@@ -336,7 +340,7 @@ Reasoning example (`/api/generate`):
 curl -s http://127.0.0.1:11424/api/generate \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "Qwen/Qwen3-8B",
+    "model": "Qwen/Qwen3.5-27B",
     "prompt": "Reason about this scenario and return the final recommendation.",
     "stream": false,
     "options": {
@@ -423,9 +427,13 @@ Useful fields:
 - `loaded`
 - `model_id`
 - `inference_backend`
+- `foreground_active`
+- `foreground_capacity`
 - `queue_depth`
 - `batch_jobs_total`
 - `batch_jobs_in_progress`
+- `batch_active`
+- `batch_capacity`
 - `batch_queue_depth`
 - `switch_in_progress`
 - `switch_target_model`

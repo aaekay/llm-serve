@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Direct vLLM debug launcher for Qwen/Qwen3.5-27B.
+# This is not the canonical llm-serve API entrypoint; use ./run-server.sh for
+# the full /v1/*, /api/*, /v1/files, /v1/batches, and /healthz surface.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -40,13 +43,14 @@ DTYPE="${DTYPE:-bfloat16}"
 TP_SIZE="${TP_SIZE:-2}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 GDN_BACKEND="${GDN_BACKEND:-triton}"
+REASONING_PARSER="${REASONING_PARSER:-qwen3}"
 TEST_PROMPT="${TEST_PROMPT:-Write a thousand word poem about dawn breaking over mountains.}"
 TEST_MAX_TOKENS="${TEST_MAX_TOKENS:-1400}"
 STARTUP_TIMEOUT_SECONDS="${STARTUP_TIMEOUT_SECONDS:-900}"
-TEST_ENABLE_THINKING="${TEST_ENABLE_THINKING:-$(dotenv_value TEST_ENABLE_THINKING)}"
-TEST_ENABLE_THINKING="${TEST_ENABLE_THINKING:-false}"
+ENABLE_THINKING="${ENABLE_THINKING:-$(dotenv_value ENABLE_THINKING)}"
+ENABLE_THINKING="${ENABLE_THINKING:-false}"
 
-export MODEL_ID HOST PORT DTYPE TP_SIZE MAX_MODEL_LEN GDN_BACKEND TEST_PROMPT TEST_MAX_TOKENS STARTUP_TIMEOUT_SECONDS TEST_ENABLE_THINKING
+export MODEL_ID HOST PORT DTYPE TP_SIZE MAX_MODEL_LEN GDN_BACKEND REASONING_PARSER TEST_PROMPT TEST_MAX_TOKENS STARTUP_TIMEOUT_SECONDS ENABLE_THINKING
 
 mkdir -p "$HF_HOME" "$HUGGINGFACE_HUB_CACHE" "$TRANSFORMERS_CACHE"
 
@@ -70,6 +74,7 @@ uv run vllm serve "$MODEL_ID" \
   --tensor-parallel-size "$TP_SIZE" \
   --max-model-len "$MAX_MODEL_LEN" \
   --language-model-only \
+  --reasoning-parser "$REASONING_PARSER" \
   --gdn-prefill-backend "$GDN_BACKEND" \
   --disable-custom-all-reduce \
   "$@" &
@@ -114,7 +119,7 @@ payload = {
     ],
     "max_tokens": int(os.environ["TEST_MAX_TOKENS"]),
 }
-enable_thinking = os.environ.get("TEST_ENABLE_THINKING", "false").strip().lower() in {
+enable_thinking = os.environ.get("ENABLE_THINKING", "false").strip().lower() in {
     "1",
     "true",
     "yes",

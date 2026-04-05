@@ -44,11 +44,11 @@ class RuntimeManager:
         self._usage_idle = asyncio.Event()
         self._usage_idle.set()
         self._active_usages = 0
-        self._switch_task: Optional["asyncio.Task[None]"] = None
+        self._switch_task: Optional[asyncio.Task[None]] = None
         self._switch_target_model: Optional[str] = None
         self._last_switch_error: Optional[str] = None
         self._startup_self_test = StartupSelfTestResult(status="pending")
-        self._startup_self_test_task: Optional["asyncio.Task[None]"] = None
+        self._startup_self_test_task: Optional[asyncio.Task[None]] = None
         self._foreground_pending = 0
         self._batch_pending = 0
         self._pending_lock = asyncio.Lock()
@@ -243,12 +243,22 @@ class RuntimeManager:
         queued = self._batch_pending - self.settings.batch_max_parallel
         return max(0, queued)
 
+    def foreground_active(self) -> int:
+        return min(self._foreground_pending, self.settings.prompt_max_parallel)
+
+    def batch_active(self) -> int:
+        return min(self._batch_pending, self.settings.batch_max_parallel)
+
     def health_snapshot(self) -> Dict[str, object]:
         return {
             "loaded": self._active_backend is not None,
             "model_id": self._active_model_id,
             "inference_backend": self.settings.inference_backend,
+            "foreground_active": self.foreground_active(),
+            "foreground_capacity": self.settings.prompt_max_parallel,
             "queue_depth": self.queue_depth(),
+            "batch_active": self.batch_active(),
+            "batch_capacity": self.settings.batch_max_parallel,
             "batch_queue_depth": self.batch_queue_depth(),
             "switch_in_progress": self.switch_in_progress,
             "switch_target_model": self._switch_target_model,
@@ -287,7 +297,7 @@ class RuntimeManager:
                 setattr(self, pending_attr, getattr(self, pending_attr) - 1)
             semaphore.release()
 
-    async def _await_switch(self, task: Optional["asyncio.Task[None]"]) -> None:
+    async def _await_switch(self, task: Optional[asyncio.Task[None]]) -> None:
         if task is None:
             return
         try:
@@ -320,7 +330,7 @@ class RuntimeManager:
         self._switch_task = asyncio.create_task(self._perform_switch(model_id, pull_first=pull_first))
         self._switch_task.add_done_callback(self._clear_finished_switch)
 
-    def _clear_finished_switch(self, task: "asyncio.Task[None]") -> None:
+    def _clear_finished_switch(self, task: asyncio.Task[None]) -> None:
         try:
             task.result()
         except Exception as exc:
@@ -505,7 +515,7 @@ class RuntimeManager:
                 timeout=self.settings.request_timeout_seconds,
             )
 
-    def _clear_startup_self_test_task(self, task: "asyncio.Task[None]") -> None:
+    def _clear_startup_self_test_task(self, task: asyncio.Task[None]) -> None:
         try:
             task.result()
         except asyncio.CancelledError:
@@ -517,7 +527,7 @@ class RuntimeManager:
                 self._startup_self_test_task = None
 
     def _serialize_startup_self_test(self) -> Dict[str, object]:
-        snapshot = {
+        return {
             "status": self._startup_self_test.status,
             "prompt": self._startup_self_test.prompt,
             "model_id": self._startup_self_test.model_id,
@@ -528,10 +538,9 @@ class RuntimeManager:
             "tokens_per_second": self._startup_self_test.tokens_per_second,
             "error": self._startup_self_test.error,
         }
-        return snapshot
 
 
 def _preview_text(text: str, limit: int = 160) -> str:
     if len(text) <= limit:
         return text
-    return "%s..." % text[: limit - 3]
+    return "%s..." % text[:limit - 3]

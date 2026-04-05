@@ -3,11 +3,12 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from llm_serve.errors import NotReadyError
+from llm_serve.errors import BadRequestError, NotReadyError
+from llm_serve.types import InferenceRequest
 from llm_serve.runtime.vllm_backend import VLLMModelBackend
 
 from .conftest import make_settings
@@ -342,6 +343,436 @@ def test_vllm_backend_sets_vllm_use_v1_env_var(tmp_path, monkeypatch):
     backend2 = VLLMModelBackend("mock/reasoning", settings_on)
     asyncio.run(backend2.start())
     assert os.environ["VLLM_USE_V1"] == "1"
+
+
+def test_vllm_backend_renders_chat_template_and_extracts_reasoning(tmp_path, monkeypatch):
+    captured = {}
+
+    class FakeAsyncEngineArgs:
+        def __init__(self, **kwargs):
+            captured["engine_args"] = kwargs
+
+    class FakeEngine:
+        async def generate(self, prompt, sampling_params, request_id):
+            captured["prompt"] = prompt
+            captured["request_id"] = request_id
+            captured["sampling_params"] = sampling_params.kwargs
+            yield SimpleNamespace(
+                outputs=[
+                    SimpleNamespace(
+                        text="<think>\ntrace\n</think>\n\nFinal answer",
+                        token_ids=[1, 2, 3, 4],
+                    )
+                ]
+            )
+
+        def shutdown(self, timeout=None):
+            return None
+
+    class FakeAsyncLLMEngine:
+        @classmethod
+        def from_engine_args(cls, args):
+            return FakeEngine()
+
+    class FakeSamplingParams:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class FakeTokenizer:
+        def apply_chat_template(self, messages, **kwargs):
+            captured["template_messages"] = messages
+            captured["template_kwargs"] = kwargs
+            return "templated-chat-prompt"
+
+    transformers_module = ModuleType("transformers")
+
+    class FakeAutoTokenizer:
+        @staticmethod
+        def from_pretrained(model_id, trust_remote_code=False, cache_dir=None):
+            captured["tokenizer_args"] = {
+                "model_id": model_id,
+                "trust_remote_code": trust_remote_code,
+                "cache_dir": cache_dir,
+            }
+            return FakeTokenizer()
+
+    transformers_module.AutoTokenizer = FakeAutoTokenizer
+
+    settings = make_settings(
+        tmp_path,
+        INFERENCE_BACKEND="vllm",
+        MODEL_CACHE_DIR="repo-model-cache",
+        VLLM_GPU_AUTO_SELECT="false",
+        CUDA_VISIBLE_DEVICES="0,1",
+        VLLM_GPU_COUNT=2,
+        ENABLE_THINKING="true",
+    )
+
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm",
+        SimpleNamespace(
+            AsyncEngineArgs=FakeAsyncEngineArgs,
+            AsyncLLMEngine=FakeAsyncLLMEngine,
+            SamplingParams=FakeSamplingParams,
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "transformers", transformers_module)
+
+    backend = VLLMModelBackend("Qwen/Qwen3.5-27B", settings)
+    asyncio.run(backend.start())
+
+    request = InferenceRequest(
+        model_id="Qwen/Qwen3.5-27B",
+        prompt="unused fallback prompt",
+        max_output_tokens=64,
+        temperature=0.2,
+        top_p=0.95,
+        stream=False,
+        reasoning_effort="medium",
+        include_reasoning=True,
+        messages=[
+            {"role": "system", "content": "Be concise."},
+            {"role": "user", "content": [{"type": "text", "text": "Say hello."}]},
+        ],
+    )
+
+    result = asyncio.run(backend.generate_chat(request))
+
+    assert captured["template_messages"] == [
+        {"role": "system", "content": "Be concise."},
+        {"role": "user", "content": "Say hello."},
+    ]
+    assert captured["template_kwargs"]["enable_thinking"] is True
+    assert captured["template_kwargs"]["tokenize"] is False
+    assert captured["template_kwargs"]["add_generation_prompt"] is True
+    assert captured["prompt"] == "templated-chat-prompt"
+    assert result.text == "Final answer"
+    assert result.reasoning == "trace"
+    assert result.completion_tokens == 4
+
+
+def test_vllm_backend_stream_hides_reasoning_content(tmp_path, monkeypatch):
+    class FakeAsyncEngineArgs:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class FakeEngine:
+        async def generate(self, prompt, sampling_params, request_id):
+            yield SimpleNamespace(outputs=[SimpleNamespace(text="<th")])
+            yield SimpleNamespace(outputs=[SimpleNamespace(text="<think>trace")])
+            yield SimpleNamespace(outputs=[SimpleNamespace(text="<think>trace</think>\n\nFinal")])
+            yield SimpleNamespace(outputs=[SimpleNamespace(text="<think>trace</think>\n\nFinal answer")])
+
+        def shutdown(self, timeout=None):
+            return None
+
+    class FakeAsyncLLMEngine:
+        @classmethod
+        def from_engine_args(cls, args):
+            return FakeEngine()
+
+    class FakeSamplingParams:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class FakeTokenizer:
+        def apply_chat_template(self, messages, **kwargs):
+            return "templated-chat-prompt"
+
+    transformers_module = ModuleType("transformers")
+
+    class FakeAutoTokenizer:
+        @staticmethod
+        def from_pretrained(model_id, trust_remote_code=False, cache_dir=None):
+            return FakeTokenizer()
+
+    transformers_module.AutoTokenizer = FakeAutoTokenizer
+
+    settings = make_settings(
+        tmp_path,
+        INFERENCE_BACKEND="vllm",
+        VLLM_GPU_AUTO_SELECT="false",
+        CUDA_VISIBLE_DEVICES="0,1",
+        VLLM_GPU_COUNT=2,
+        ENABLE_THINKING="true",
+    )
+
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm",
+        SimpleNamespace(
+            AsyncEngineArgs=FakeAsyncEngineArgs,
+            AsyncLLMEngine=FakeAsyncLLMEngine,
+            SamplingParams=FakeSamplingParams,
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "transformers", transformers_module)
+
+    backend = VLLMModelBackend("Qwen/Qwen3.5-27B", settings)
+    asyncio.run(backend.start())
+    request = InferenceRequest(
+        model_id="Qwen/Qwen3.5-27B",
+        prompt="unused fallback prompt",
+        max_output_tokens=64,
+        temperature=0.2,
+        top_p=0.95,
+        stream=True,
+        reasoning_effort="high",
+        include_reasoning=False,
+        messages=[{"role": "user", "content": "Count to two."}],
+    )
+
+    async def collect():
+        chunks = []
+        async for chunk in backend.generate_chat_stream(request):
+            chunks.append(chunk)
+        return chunks
+
+    chunks = asyncio.run(collect())
+    assert "".join(chunks).strip() == "Final answer"
+    assert "<think>" not in "".join(chunks)
+
+
+def test_vllm_backend_rejects_reasoning_controls_without_enable_thinking_support(tmp_path, monkeypatch):
+    class FakeAsyncEngineArgs:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class FakeEngine:
+        def shutdown(self, timeout=None):
+            return None
+
+    class FakeAsyncLLMEngine:
+        @classmethod
+        def from_engine_args(cls, args):
+            return FakeEngine()
+
+    class FakeSamplingParams:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class FakeTokenizer:
+        def apply_chat_template(self, messages, **kwargs):
+            raise TypeError("apply_chat_template() got an unexpected keyword argument 'enable_thinking'")
+
+    transformers_module = ModuleType("transformers")
+
+    class FakeAutoTokenizer:
+        @staticmethod
+        def from_pretrained(model_id, trust_remote_code=False, cache_dir=None):
+            return FakeTokenizer()
+
+    transformers_module.AutoTokenizer = FakeAutoTokenizer
+
+    settings = make_settings(
+        tmp_path,
+        INFERENCE_BACKEND="vllm",
+        VLLM_GPU_AUTO_SELECT="false",
+        CUDA_VISIBLE_DEVICES="0,1",
+        VLLM_GPU_COUNT=2,
+        ENABLE_THINKING="true",
+    )
+
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm",
+        SimpleNamespace(
+            AsyncEngineArgs=FakeAsyncEngineArgs,
+            AsyncLLMEngine=FakeAsyncLLMEngine,
+            SamplingParams=FakeSamplingParams,
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "transformers", transformers_module)
+
+    backend = VLLMModelBackend("mock/reasoning", settings)
+    asyncio.run(backend.start())
+    request = InferenceRequest(
+        model_id="mock/reasoning",
+        prompt="unused fallback prompt",
+        max_output_tokens=64,
+        temperature=0.2,
+        top_p=0.95,
+        stream=False,
+        reasoning_effort="medium",
+        include_reasoning=False,
+        messages=[{"role": "user", "content": "Think carefully."}],
+    )
+
+    with pytest.raises(BadRequestError, match="does not support reasoning controls"):
+        asyncio.run(backend.generate_chat(request))
+
+
+def test_vllm_backend_thinking_disabled_ignores_reasoning_effort(tmp_path, monkeypatch):
+    """When ENABLE_THINKING=false, enable_thinking is always False even with reasoning_effort set."""
+    captured = {}
+
+    class FakeAsyncEngineArgs:
+        def __init__(self, **kwargs):
+            captured["engine_args"] = kwargs
+
+    class FakeEngine:
+        async def generate(self, prompt, sampling_params, request_id):
+            captured["prompt"] = prompt
+            yield SimpleNamespace(
+                outputs=[
+                    SimpleNamespace(
+                        text="Normal answer",
+                        token_ids=[1, 2],
+                    )
+                ]
+            )
+
+        def shutdown(self, timeout=None):
+            return None
+
+    class FakeAsyncLLMEngine:
+        @classmethod
+        def from_engine_args(cls, args):
+            return FakeEngine()
+
+    class FakeSamplingParams:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class FakeTokenizer:
+        def apply_chat_template(self, messages, **kwargs):
+            captured["template_kwargs"] = kwargs
+            return "templated-prompt"
+
+    transformers_module = ModuleType("transformers")
+
+    class FakeAutoTokenizer:
+        @staticmethod
+        def from_pretrained(model_id, trust_remote_code=False, cache_dir=None):
+            return FakeTokenizer()
+
+    transformers_module.AutoTokenizer = FakeAutoTokenizer
+
+    settings = make_settings(
+        tmp_path,
+        INFERENCE_BACKEND="vllm",
+        VLLM_GPU_AUTO_SELECT="false",
+        CUDA_VISIBLE_DEVICES="0,1",
+        VLLM_GPU_COUNT=2,
+        ENABLE_THINKING="false",
+    )
+
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm",
+        SimpleNamespace(
+            AsyncEngineArgs=FakeAsyncEngineArgs,
+            AsyncLLMEngine=FakeAsyncLLMEngine,
+            SamplingParams=FakeSamplingParams,
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "transformers", transformers_module)
+
+    backend = VLLMModelBackend("mock/reasoning", settings)
+    asyncio.run(backend.start())
+
+    request = InferenceRequest(
+        model_id="mock/reasoning",
+        prompt="unused",
+        max_output_tokens=64,
+        temperature=0.2,
+        top_p=0.95,
+        stream=False,
+        reasoning_effort="medium",
+        include_reasoning=False,
+        messages=[{"role": "user", "content": "Think about it."}],
+    )
+
+    result = asyncio.run(backend.generate_chat(request))
+
+    assert captured["template_kwargs"]["enable_thinking"] is False
+    assert result.text == "Normal answer"
+
+
+def test_vllm_backend_thinking_enabled_without_reasoning_effort_stays_off(tmp_path, monkeypatch):
+    """When ENABLE_THINKING=true but reasoning_effort is not set, enable_thinking is False."""
+    captured = {}
+
+    class FakeAsyncEngineArgs:
+        def __init__(self, **kwargs):
+            captured["engine_args"] = kwargs
+
+    class FakeEngine:
+        async def generate(self, prompt, sampling_params, request_id):
+            captured["prompt"] = prompt
+            yield SimpleNamespace(
+                outputs=[
+                    SimpleNamespace(
+                        text="Normal answer",
+                        token_ids=[1, 2],
+                    )
+                ]
+            )
+
+        def shutdown(self, timeout=None):
+            return None
+
+    class FakeAsyncLLMEngine:
+        @classmethod
+        def from_engine_args(cls, args):
+            return FakeEngine()
+
+    class FakeSamplingParams:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class FakeTokenizer:
+        def apply_chat_template(self, messages, **kwargs):
+            captured["template_kwargs"] = kwargs
+            return "templated-prompt"
+
+    transformers_module = ModuleType("transformers")
+
+    class FakeAutoTokenizer:
+        @staticmethod
+        def from_pretrained(model_id, trust_remote_code=False, cache_dir=None):
+            return FakeTokenizer()
+
+    transformers_module.AutoTokenizer = FakeAutoTokenizer
+
+    settings = make_settings(
+        tmp_path,
+        INFERENCE_BACKEND="vllm",
+        VLLM_GPU_AUTO_SELECT="false",
+        CUDA_VISIBLE_DEVICES="0,1",
+        VLLM_GPU_COUNT=2,
+        ENABLE_THINKING="true",
+    )
+
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm",
+        SimpleNamespace(
+            AsyncEngineArgs=FakeAsyncEngineArgs,
+            AsyncLLMEngine=FakeAsyncLLMEngine,
+            SamplingParams=FakeSamplingParams,
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "transformers", transformers_module)
+
+    backend = VLLMModelBackend("mock/reasoning", settings)
+    asyncio.run(backend.start())
+
+    request = InferenceRequest(
+        model_id="mock/reasoning",
+        prompt="unused",
+        max_output_tokens=64,
+        temperature=0.2,
+        top_p=0.95,
+        stream=False,
+        messages=[{"role": "user", "content": "Hello."}],
+    )
+
+    result = asyncio.run(backend.generate_chat(request))
+
+    assert captured["template_kwargs"]["enable_thinking"] is False
+    assert result.text == "Normal answer"
 
 
 def _gpu(index: int, total_mib: int, free_mib: int):

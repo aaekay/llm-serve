@@ -10,7 +10,6 @@ from llm_serve.config import Settings
 
 
 def _configure_app_logging() -> None:
-    """Uvicorn only configures its own loggers; without this, llm_serve INFO (e.g. startup self-test output) is hidden."""
     log = logging.getLogger("llm_serve")
     if log.handlers:
         return

@@ -122,6 +122,8 @@ def test_ollama_backend_preserves_chat_tags_and_pull_api(tmp_path, monkeypatch):
 
         pull = client.post("/api/pull", json={"name": "mock/reasoning"})
         assert pull.status_code == 202
+        assert pull.headers["Retry-After"] == "2"
+        assert pull.json()["retry_after_seconds"] == 2
         _wait_for_openai_model(client, "mock/reasoning")
         pulled_completion = client.post(
             "/v1/chat/completions",
@@ -338,6 +340,7 @@ def _wait_for_openai_model(client: TestClient, model_id: str):
         if response.status_code == 200:
             return response
         assert response.status_code == 202
+        assert response.headers["Retry-After"] == "2"
         time.sleep(0.05)
     raise AssertionError("Timed out waiting for model load: %s" % last_response.json())
 

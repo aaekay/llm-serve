@@ -61,6 +61,7 @@ class Settings:
     ollama_default_model_id: Optional[str]
     model_allowlist: List[str]
     reasoning_model_allowlist: List[str]
+    enable_thinking: bool
     prompt_max_parallel: int
     batch_max_parallel: int
     foreground_queue_limit: int
@@ -133,8 +134,12 @@ class Settings:
             ollama_default_model_id=ollama_default_model_id,
             model_allowlist=model_allowlist,
             reasoning_model_allowlist=reasoning_allowlist,
+            enable_thinking=_parse_bool(
+                env_source.get("ENABLE_THINKING", "false"),
+                "ENABLE_THINKING",
+            ),
             prompt_max_parallel=int(env_source.get("PROMPT_MAX_PARALLEL", "8")),
-            batch_max_parallel=int(env_source.get("BATCH_MAX_PARALLEL", "2")),
+            batch_max_parallel=int(env_source.get("BATCH_MAX_PARALLEL", "4")),
             foreground_queue_limit=int(env_source.get("FOREGROUND_QUEUE_LIMIT", "32")),
             batch_queue_limit=int(env_source.get("BATCH_QUEUE_LIMIT", "128")),
             max_input_tokens=int(env_source.get("MAX_INPUT_TOKENS", "4096")),
@@ -167,7 +172,7 @@ class Settings:
                     env_source.get("MAX_OUTPUT_TOKENS", "1024"),
                 )
             ),
-            vllm_dtype=env_source.get("VLLM_DTYPE", "auto"),
+            vllm_dtype=env_source.get("VLLM_DTYPE", "bfloat16"),
             vllm_tokenizer_mode=env_source.get("VLLM_TOKENIZER_MODE", "auto"),
             vllm_trust_remote_code=_parse_bool(
                 env_source.get("VLLM_TRUST_REMOTE_CODE", "false"),
@@ -182,7 +187,7 @@ class Settings:
                 "VLLM_USE_V1",
             ),
             vllm_language_model_only=_parse_bool(
-                env_source.get("VLLM_LANGUAGE_MODEL_ONLY", "false"),
+                env_source.get("VLLM_LANGUAGE_MODEL_ONLY", "true"),
                 "VLLM_LANGUAGE_MODEL_ONLY",
             ),
             vllm_max_model_len=(

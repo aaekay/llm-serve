@@ -8,7 +8,7 @@ import sys
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Callable, Dict, Optional, Protocol, TextIO
+from typing import Callable, Dict, List, Optional, Protocol, TextIO
 
 from llm_serve.errors import BadRequestError, UpstreamTimeoutError
 from llm_serve.prompting import render_messages_to_prompt
@@ -21,7 +21,7 @@ from .runtime.manager import RuntimeManager
 
 try:
     from tqdm import tqdm
-except ImportError:  # pragma: no cover - degraded fallback if dependencies were not refreshed yet.
+except ImportError:  # pragma: no cover
     tqdm = None
 
 
@@ -91,7 +91,7 @@ class BatchManager:
     ) -> None:
         self.storage = storage
         self.runtime = runtime
-        self._tasks: Dict[str, "asyncio.Task[None]"] = {}
+        self._tasks: Dict[str, asyncio.Task[None]] = {}
         self._locks: Dict[str, asyncio.Lock] = {}
         self._progress_enabled = _supports_live_progress(progress_stream) if progress_enabled is None else progress_enabled
         self._progress_factory = progress_factory or (
@@ -100,7 +100,7 @@ class BatchManager:
         self._progress: Dict[str, _BatchProgressState] = {}
         self._batch_total = 0
         self._batch_in_progress = 0
-        self._cleanup_task: Optional["asyncio.Task[None]"] = None
+        self._cleanup_task: Optional[asyncio.Task[None]] = None
 
     def batch_counts(self) -> tuple:
         return self._batch_total, self._batch_in_progress
@@ -203,7 +203,7 @@ class BatchManager:
         self.storage.save_batch(batch)
         self._start_progress(batch.id, batch.request_counts.total)
 
-        tasks = []
+        tasks: List[asyncio.Task] = []
         defer_timeout_errors = self._should_retry_batch_timeouts()
         max_concurrent = self.runtime.settings.batch_max_parallel + self.runtime.settings.batch_queue_limit
         limiter = asyncio.Semaphore(max_concurrent)
@@ -392,6 +392,7 @@ class BatchManager:
                 stream=False,
                 reasoning_effort=openai_request.reasoning_effort,
                 include_reasoning=openai_request.include_reasoning,
+                messages=[message.model_dump() for message in openai_request.messages],
                 timeout_retry_enabled=timeout_retry_enabled,
             ),
         )
@@ -416,6 +417,7 @@ class BatchManager:
             stream=False,
             reasoning_effort=inference_request.reasoning_effort,
             include_reasoning=inference_request.include_reasoning,
+            messages=inference_request.messages,
             upstream_timeout_seconds=retry_timeout,
             timeout_retry_enabled=False,
         )
@@ -557,7 +559,7 @@ def _build_batch_response_body(
     completion_tokens: int,
     reasoning: Optional[str],
 ) -> Dict[str, object]:
-    message = {"role": "assistant", "content": text}
+    message: Dict[str, object] = {"role": "assistant", "content": text}
     if reasoning:
         message["reasoning"] = reasoning
     created = int(datetime.now(timezone.utc).timestamp())

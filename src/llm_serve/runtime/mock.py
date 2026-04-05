@@ -37,7 +37,7 @@ class MockModelBackend(ModelBackend):
         while index < len(text):
             if self._delay > 0:
                 await asyncio.sleep(self._delay)
-            yield text[index : index + chunk_size]
+            yield text[index: index + chunk_size]
             index += chunk_size
 
     def _build_text(self, request: InferenceRequest) -> str:

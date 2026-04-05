@@ -121,6 +121,44 @@ def test_runtime_manager_rejects_when_foreground_queue_is_full(tmp_path):
     asyncio.run(scenario())
 
 
+def test_runtime_manager_health_snapshot_reports_active_and_queued_foreground_work(tmp_path):
+    settings = make_settings(
+        tmp_path,
+        PROMPT_MAX_PARALLEL=1,
+        FOREGROUND_QUEUE_LIMIT=1,
+        STARTUP_SELF_TEST_ENABLED="false",
+    )
+
+    async def factory(model_id: str) -> ModelBackend:
+        return TrackingBackend(model_id, delay=0.1)
+
+    async def scenario():
+        runtime = RuntimeManager(settings, backend_factory=factory)
+        await runtime.startup()
+        request = InferenceRequest(
+            model_id="mock/default",
+            prompt="hello",
+            max_output_tokens=16,
+            temperature=0.2,
+            top_p=0.95,
+            stream=False,
+        )
+        first = asyncio.create_task(runtime.run_foreground(request))
+        second = asyncio.create_task(runtime.run_foreground(request))
+        await asyncio.sleep(0.02)
+        snapshot = runtime.health_snapshot()
+        await asyncio.gather(first, second)
+        await runtime.shutdown()
+        return snapshot
+
+    snapshot = asyncio.run(scenario())
+    assert snapshot["foreground_active"] == 1
+    assert snapshot["foreground_capacity"] == 1
+    assert snapshot["queue_depth"] == 1
+    assert snapshot["batch_active"] == 0
+    assert snapshot["batch_capacity"] == 2
+
+
 def test_runtime_manager_startup_does_not_wait_for_background_self_test(tmp_path):
     settings = make_settings(tmp_path, MOCK_RESPONSE_DELAY_SECONDS=0.2)
 

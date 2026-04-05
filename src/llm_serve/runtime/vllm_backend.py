@@ -7,7 +7,12 @@ import uuid
 from typing import AsyncIterator, Callable, List, Optional
 
 from llm_serve.config import Settings
-from llm_serve.errors import NotReadyError, UpstreamRuntimeError
+from llm_serve.errors import BadRequestError, NotReadyError, UpstreamRuntimeError
+from llm_serve.prompting import (
+    ThinkingContentStripper,
+    normalize_messages_for_chat_template,
+    split_reasoning_output,
+)
 from llm_serve.tokenization import estimate_text_tokens
 from llm_serve.types import InferenceRequest, InferenceResult
 
@@ -38,6 +43,7 @@ class VLLMModelBackend(ModelBackend):
         self._gpu_query_fn = gpu_query_fn or query_nvidia_smi_gpus
         self._engine = None
         self._sampling_params_cls = None
+        self._tokenizer = None
         self._engine_lock = asyncio.Lock()
         self._effective_cuda_visible_devices = settings.cuda_visible_devices
         self._effective_gpu_memory_utilization = settings.vllm_gpu_memory_utilization
@@ -52,8 +58,6 @@ class VLLMModelBackend(ModelBackend):
         self._engine = None
         if engine is None:
             return
-        # vLLM v1 exposes engine.shutdown(timeout=...); older builds used shutdown_background_loop().
-        # Calling the full shutdown path tears down EngineCore / worker procs and releases GPU memory.
         shutdown_fn = getattr(engine, "shutdown", None)
         if callable(shutdown_fn):
             try:
@@ -66,6 +70,24 @@ class VLLMModelBackend(ModelBackend):
             shutdown_background_loop()
 
     async def generate(self, request: InferenceRequest) -> InferenceResult:
+        prompt = self._resolve_prompt(request, use_messages=False)
+        return await self._generate_from_prompt(request, prompt)
+
+    async def generate_chat(self, request: InferenceRequest) -> InferenceResult:
+        prompt = self._resolve_prompt(request, use_messages=True)
+        return await self._generate_from_prompt(request, prompt)
+
+    async def generate_stream(self, request: InferenceRequest) -> AsyncIterator[str]:
+        prompt = self._resolve_prompt(request, use_messages=False)
+        async for chunk in self._generate_stream_from_prompt(request, prompt):
+            yield chunk
+
+    async def generate_chat_stream(self, request: InferenceRequest) -> AsyncIterator[str]:
+        prompt = self._resolve_prompt(request, use_messages=True)
+        async for chunk in self._generate_stream_from_prompt(request, prompt):
+            yield chunk
+
+    async def _generate_from_prompt(self, request: InferenceRequest, prompt: str) -> InferenceResult:
         engine = await self._ensure_engine()
         sampling_params = self._sampling_params_cls(
             max_tokens=request.max_output_tokens,
@@ -75,8 +97,9 @@ class VLLMModelBackend(ModelBackend):
         request_id = uuid.uuid4().hex
         final_text = ""
         completion_tokens = 0
+
         try:
-            async for output in engine.generate(request.prompt, sampling_params, request_id):
+            async for output in engine.generate(prompt, sampling_params, request_id):
                 if not output.outputs:
                     continue
                 final_output = output.outputs[0]
@@ -84,18 +107,19 @@ class VLLMModelBackend(ModelBackend):
                 token_ids = getattr(final_output, "token_ids", None)
                 if token_ids is not None:
                     completion_tokens = len(token_ids)
-        except Exception as exc:  # pragma: no cover - depends on runtime installation
+        except Exception as exc:  # pragma: no cover
             raise UpstreamRuntimeError("vLLM generation failed: %s" % exc) from exc
 
+        reasoning, answer = split_reasoning_output(final_text)
         return InferenceResult(
             model_id=self.model_id,
-            text=final_text,
-            prompt_tokens=estimate_text_tokens(request.prompt),
+            text=answer,
+            prompt_tokens=estimate_text_tokens(prompt),
             completion_tokens=completion_tokens or estimate_text_tokens(final_text),
-            reasoning=None,
+            reasoning=reasoning,
         )
 
-    async def generate_stream(self, request: InferenceRequest) -> AsyncIterator[str]:
+    async def _generate_stream_from_prompt(self, request: InferenceRequest, prompt: str) -> AsyncIterator[str]:
         engine = await self._ensure_engine()
         sampling_params = self._sampling_params_cls(
             max_tokens=request.max_output_tokens,
@@ -104,18 +128,24 @@ class VLLMModelBackend(ModelBackend):
         )
         request_id = uuid.uuid4().hex
         previous_text = ""
+        stripper = ThinkingContentStripper()
 
         try:
-            async for output in engine.generate(request.prompt, sampling_params, request_id):
+            async for output in engine.generate(prompt, sampling_params, request_id):
                 if not output.outputs:
                     continue
                 current_text = output.outputs[0].text
-                delta = current_text[len(previous_text) :]
+                delta = current_text[len(previous_text):]
                 previous_text = current_text
-                if delta:
-                    yield delta
-        except Exception as exc:  # pragma: no cover - depends on runtime installation
+                for visible_chunk in stripper.push(delta):
+                    if visible_chunk:
+                        yield visible_chunk
+        except Exception as exc:  # pragma: no cover
             raise UpstreamRuntimeError("vLLM generation failed: %s" % exc) from exc
+
+        tail = stripper.finish()
+        if tail:
+            yield tail
 
     async def _ensure_engine(self):
         if self._engine is not None:
@@ -128,7 +158,7 @@ class VLLMModelBackend(ModelBackend):
             self._apply_runtime_environment()
             try:
                 from vllm import AsyncEngineArgs, AsyncLLMEngine, SamplingParams
-            except ImportError as exc:  # pragma: no cover - depends on runtime installation
+            except ImportError as exc:  # pragma: no cover
                 raise NotReadyError(
                     "vLLM is not installed. Install the runtime dependencies before using INFERENCE_BACKEND=vllm."
                 ) from exc
@@ -150,7 +180,7 @@ class VLLMModelBackend(ModelBackend):
             )
             try:
                 self._engine = AsyncLLMEngine.from_engine_args(engine_args)
-            except Exception as exc:  # pragma: no cover - depends on runtime installation
+            except Exception as exc:  # pragma: no cover
                 raise NotReadyError(self._format_engine_init_error(exc)) from exc
             self._sampling_params_cls = SamplingParams
             return self._engine
@@ -216,6 +246,74 @@ class VLLMModelBackend(ModelBackend):
         if self._effective_cuda_visible_devices is None:
             return
         os.environ["CUDA_VISIBLE_DEVICES"] = self._effective_cuda_visible_devices
+
+    def _resolve_prompt(self, request: InferenceRequest, use_messages: bool) -> str:
+        enable_thinking = self._settings.enable_thinking and bool(request.reasoning_effort)
+        if use_messages:
+            if not request.messages:
+                raise BadRequestError("Chat requests must include messages")
+            return self._render_chat_prompt(request.messages, enable_thinking=enable_thinking)
+        if enable_thinking:
+            return self._render_chat_prompt(
+                [{"role": "user", "content": request.prompt}],
+                enable_thinking=True,
+            )
+        return request.prompt
+
+    def _render_chat_prompt(self, messages, enable_thinking: bool) -> str:
+        tokenizer = self._ensure_tokenizer()
+        apply_chat_template = getattr(tokenizer, "apply_chat_template", None)
+        if not callable(apply_chat_template):
+            raise NotReadyError(
+                "Tokenizer for model '%s' does not support chat templates required by the vLLM backend."
+                % self.model_id
+            )
+
+        normalized_messages = normalize_messages_for_chat_template(messages)
+        base_kwargs = {
+            "tokenize": False,
+            "add_generation_prompt": True,
+        }
+        try:
+            return apply_chat_template(
+                normalized_messages,
+                enable_thinking=enable_thinking,
+                **base_kwargs,
+            )
+        except TypeError as exc:
+            if "enable_thinking" not in str(exc):
+                raise UpstreamRuntimeError("vLLM chat template rendering failed: %s" % exc) from exc
+            if enable_thinking:
+                raise BadRequestError(
+                    "Model '%s' does not support reasoning controls through the vLLM backend."
+                    % self.model_id
+                ) from exc
+            try:
+                return apply_chat_template(normalized_messages, **base_kwargs)
+            except Exception as fallback_exc:
+                raise UpstreamRuntimeError("vLLM chat template rendering failed: %s" % fallback_exc) from fallback_exc
+        except Exception as exc:
+            raise UpstreamRuntimeError("vLLM chat template rendering failed: %s" % exc) from exc
+
+    def _ensure_tokenizer(self):
+        if self._tokenizer is not None:
+            return self._tokenizer
+        try:
+            from transformers import AutoTokenizer
+        except ImportError as exc:  # pragma: no cover
+            raise NotReadyError(
+                "transformers is not installed. Install the runtime dependencies before using chat requests with INFERENCE_BACKEND=vllm."
+            ) from exc
+
+        try:
+            self._tokenizer = AutoTokenizer.from_pretrained(
+                self.model_id,
+                trust_remote_code=self._settings.vllm_trust_remote_code,
+                cache_dir=str(self._settings.model_cache_dir),
+            )
+        except Exception as exc:  # pragma: no cover
+            raise NotReadyError("Failed to load tokenizer for model '%s': %s" % (self.model_id, exc)) from exc
+        return self._tokenizer
 
     def _format_engine_init_error(self, exc: Exception) -> str:
         detail = str(exc).strip() or exc.__class__.__name__

@@ -12,13 +12,13 @@ from .base import ModelBackend
 
 try:
     import httpx
-except ImportError:  # pragma: no cover - runtime dependency guard
+except ImportError:  # pragma: no cover
     httpx = None
 
 
 class OllamaAPIClient:
     def __init__(self, settings: Settings, transport: Optional["httpx.AsyncBaseTransport"] = None) -> None:
-        if httpx is None:  # pragma: no cover - runtime dependency guard
+        if httpx is None:  # pragma: no cover
             raise NotReadyError(
                 "httpx is not installed. Install the project dependencies before using INFERENCE_BACKEND=ollama."
             )

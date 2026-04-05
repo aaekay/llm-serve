@@ -19,7 +19,7 @@ ContentPart = Union[TextContentPart, ImageContentPart]
 
 
 class ChatMessage(BaseModel):
-    role: Literal["system", "user", "assistant", "tool"]
+    role: Literal["system", "user", "assistant"]
     content: Union[str, List[ContentPart]]
 
 
@@ -28,7 +28,7 @@ class OpenAIChatRequest(BaseModel):
     model: Optional[str] = None
     stream: bool = False
     temperature: Optional[float] = Field(default=None, ge=0, le=2)
-    top_p: Optional[float] = Field(default=None, ge=0, le=1)
+    top_p: Optional[float] = Field(default=None, gt=0, le=1)
     max_tokens: Optional[int] = Field(default=None, ge=1)
     max_completion_tokens: Optional[int] = Field(default=None, ge=1)
     reasoning_effort: Optional[Literal["low", "medium", "high"]] = None
@@ -52,7 +52,7 @@ class OpenAIChatRequest(BaseModel):
 class OllamaOptions(BaseModel):
     num_predict: Optional[int] = Field(default=None, ge=1)
     temperature: Optional[float] = Field(default=None, ge=0, le=2)
-    top_p: Optional[float] = Field(default=None, ge=0, le=1)
+    top_p: Optional[float] = Field(default=None, gt=0, le=1)
     reasoning_effort: Optional[Literal["low", "medium", "high"]] = None
     include_reasoning: Optional[bool] = None
 

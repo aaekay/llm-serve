@@ -2,8 +2,11 @@
 
 ## Entry Points
 
+- Shell launcher: `run-server.sh` -> `uv run llm-serve` in the repo root without forcing backend-specific optional dependencies
+- Raw vLLM launcher: `run-qwen35-27b.sh` -> `vllm serve` only for direct debugging or benchmarking
 - CLI: `llm-serve` -> [`src/llm_serve/main.py`](/Users/aaekay/Documents/projects/llm-serve/src/llm_serve/main.py)
 - ASGI app factory: [`src/llm_serve/app.py`](/Users/aaekay/Documents/projects/llm-serve/src/llm_serve/app.py)
+- Qwen/vLLM-specific launch and tuning notes: [`docs/qwen-vllm.md`](qwen-vllm.md)
 
 ## Inference Modes
 
@@ -11,6 +14,7 @@
 - `INFERENCE_BACKEND=ollama` treats Ollama as an already-running upstream service and proxies inference, optional pulls, and model tags to `OLLAMA_BASE_URL`.
 - `INFERENCE_BACKEND=mock` exists only for tests and lightweight local verification.
 - Default-model precedence is backend-aware: `VLLM_DEFAULT_MODEL_ID` overrides `DEFAULT_MODEL_ID` in `vllm`, `OLLAMA_DEFAULT_MODEL_ID` overrides it in `ollama`, and `mock` uses `DEFAULT_MODEL_ID`.
+- In `vllm` mode, chat requests should use model-native chat templates. For Qwen/Qwen3.5-27B, `reasoning_effort` enables thinking mode and non-stream reasoning may be surfaced in the response body, while streamed output remains answer-only.
 
 ## GPU Configuration
 
@@ -37,7 +41,14 @@
 - By default the self-test is launched in the background, so FastAPI startup completes after model load and `/healthz` reports `queued`, `running`, `passed`, or `failed`.
 - The runtime records completion tokens, latency, and tokens-per-second and exposes them via `/healthz`.
 - The runtime also logs default-model load, self-test queue/start transitions, and the final pass/fail result so background failures are visible without polling `/healthz`.
+- `/healthz` also exposes `foreground_active`/`foreground_capacity` and `batch_active`/`batch_capacity`, so operators can distinguish live overlap from simple queue depth.
 - When `STARTUP_SELF_TEST_BLOCKING=true`, startup instead waits for the self-test to finish and fails immediately if generation fails.
+
+## Throughput Guidance
+
+- `PROMPT_MAX_PARALLEL` controls how many foreground requests can actively execute at once; extra requests wait in the foreground queue until one slot frees up.
+- On large Ollama-hosted models, higher foreground parallelism often trades away per-request token rate for only a modest aggregate-throughput gain.
+- If single-user responsiveness matters more than total throughput, reduce `PROMPT_MAX_PARALLEL` and prefer a smaller model such as `gpt-oss:20b` or `qwen3:8b` over `gpt-oss:120b`.
 
 ## Interactive Request Flow
 

@@ -14,6 +14,7 @@ def make_settings(tmp_path: Path, **overrides: Any) -> Settings:
         "DEFAULT_MODEL_ID": "mock/default",
         "MODEL_ALLOWLIST": "mock/default,mock/reasoning",
         "REASONING_MODEL_ALLOWLIST": "mock/reasoning",
+        "ENABLE_THINKING": "false",
         "PROMPT_MAX_PARALLEL": "8",
         "BATCH_MAX_PARALLEL": "2",
         "FOREGROUND_QUEUE_LIMIT": "16",

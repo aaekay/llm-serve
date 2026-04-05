@@ -18,6 +18,10 @@ def test_healthz_and_openai_chat_completion(tmp_path):
         assert health.status_code == 200
         assert health.json()["loaded"] is True
         assert health.json()["model_id"] == "mock/default"
+        assert health.json()["foreground_active"] == 0
+        assert health.json()["foreground_capacity"] == 8
+        assert health.json()["batch_active"] == 0
+        assert health.json()["batch_capacity"] == 2
         assert health.json()["startup_self_test"]["status"] in {"queued", "running", "passed"}
         startup_self_test = _wait_for_startup_self_test(client, {"passed"})
         assert startup_self_test["prompt"] == "Write a thousand word poem about sunrise."
@@ -68,6 +72,8 @@ def test_request_to_unloaded_model_returns_202_then_succeeds(tmp_path):
             },
         )
         assert first.status_code == 202
+        assert first.headers["Retry-After"] == "2"
+        assert first.json()["retry_after_seconds"] == 2
         time.sleep(0.05)
         second = client.post(
             "/v1/chat/completions",
@@ -98,6 +104,39 @@ def test_openai_streaming_endpoint_emits_done_marker(tmp_path):
     assert response.status_code == 200
     assert "data: [DONE]" in body
     assert "chat.completion.chunk" in body
+
+
+def test_openai_request_rejects_tool_messages(tmp_path):
+    settings = make_settings(tmp_path)
+
+    with TestClient(create_app(settings)) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "messages": [{"role": "tool", "content": "Tool output"}],
+                "stream": False,
+            },
+        )
+
+    assert response.status_code == 400
+    assert "Input should be 'system', 'user' or 'assistant'" in response.json()["error"]["message"]
+
+
+def test_openai_request_rejects_top_p_zero(tmp_path):
+    settings = make_settings(tmp_path)
+
+    with TestClient(create_app(settings)) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "messages": [{"role": "user", "content": "Say hello"}],
+                "top_p": 0,
+                "stream": False,
+            },
+        )
+
+    assert response.status_code == 400
+    assert "greater than 0" in response.json()["error"]["message"]
 
 
 def test_batch_file_upload_and_processing(tmp_path):

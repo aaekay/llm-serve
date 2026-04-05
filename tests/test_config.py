@@ -27,6 +27,7 @@ def test_settings_loads_csv_and_boolean_fields(tmp_path):
     assert settings.vllm_trust_remote_code is True
     assert settings.vllm_enforce_eager is True
     assert settings.vllm_use_v1 is False
+    assert settings.vllm_language_model_only is True
     assert settings.vllm_gpu_auto_select is False
     assert settings.ollama_base_url == "http://127.0.0.1:11434"
     assert settings.ollama_request_timeout_seconds == 120
@@ -204,6 +205,69 @@ def test_settings_accepts_ollama_backend(tmp_path):
 
     assert settings.inference_backend == "ollama"
     assert settings.ollama_base_url == "http://ollama.local:11434"
+
+
+def test_settings_parses_enable_thinking(tmp_path):
+    off = Settings.load(
+        base_dir=tmp_path,
+        environ={
+            "DEFAULT_MODEL_ID": "mock/default",
+            "MODEL_ALLOWLIST": "mock/default,mock/reasoning",
+            "REASONING_MODEL_ALLOWLIST": "mock/reasoning",
+            "ENABLE_THINKING": "false",
+        },
+    )
+    on = Settings.load(
+        base_dir=tmp_path,
+        environ={
+            "DEFAULT_MODEL_ID": "mock/default",
+            "MODEL_ALLOWLIST": "mock/default,mock/reasoning",
+            "REASONING_MODEL_ALLOWLIST": "mock/reasoning",
+            "ENABLE_THINKING": "true",
+        },
+    )
+
+    assert off.enable_thinking is False
+    assert on.enable_thinking is True
+
+
+def test_settings_defaults_enable_thinking_to_false(tmp_path):
+    settings = Settings.load(
+        base_dir=tmp_path,
+        environ={
+            "DEFAULT_MODEL_ID": "mock/default",
+            "MODEL_ALLOWLIST": "mock/default,mock/reasoning",
+            "REASONING_MODEL_ALLOWLIST": "mock/reasoning",
+        },
+    )
+
+    assert settings.enable_thinking is False
+
+
+def test_settings_defaults_vllm_dtype_to_bfloat16(tmp_path):
+    settings = Settings.load(
+        base_dir=tmp_path,
+        environ={
+            "DEFAULT_MODEL_ID": "mock/default",
+            "MODEL_ALLOWLIST": "mock/default,mock/reasoning",
+            "REASONING_MODEL_ALLOWLIST": "mock/reasoning",
+        },
+    )
+
+    assert settings.vllm_dtype == "bfloat16"
+
+
+def test_settings_defaults_batch_max_parallel_to_4(tmp_path):
+    settings = Settings.load(
+        base_dir=tmp_path,
+        environ={
+            "DEFAULT_MODEL_ID": "mock/default",
+            "MODEL_ALLOWLIST": "mock/default,mock/reasoning",
+            "REASONING_MODEL_ALLOWLIST": "mock/reasoning",
+        },
+    )
+
+    assert settings.batch_max_parallel == 4
 
 
 def test_settings_loads_ollama_retry_controls(tmp_path):
