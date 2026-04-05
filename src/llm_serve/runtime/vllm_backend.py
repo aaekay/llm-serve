@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import atexit
 import asyncio
 import logging
 import os
+import signal
+import subprocess
 import uuid
-from typing import AsyncIterator, Callable, List, Optional
+from typing import AsyncIterator, Callable, List, Optional, Set
 
 from llm_serve.config import Settings
 from llm_serve.errors import BadRequestError, NotReadyError, UpstreamRuntimeError
@@ -28,6 +31,49 @@ from .gpu_selection import (
 
 logger = logging.getLogger(__name__)
 
+# Module-level set so the atexit handler can reach it even if the
+# VLLMModelBackend instance has been garbage-collected.
+_tracked_worker_pids: Set[int] = set()
+
+
+def _get_child_pids() -> Set[int]:
+    """Return PIDs of all direct child processes of the current process."""
+    try:
+        result = subprocess.run(
+            ["pgrep", "-P", str(os.getpid())],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return {int(pid) for pid in result.stdout.strip().split("\n") if pid.strip()}
+    except Exception:
+        return set()
+
+
+def _kill_pids(pids: Set[int], sig: int = signal.SIGKILL) -> None:
+    """Send a signal to each PID, ignoring already-exited processes."""
+    for pid in pids:
+        try:
+            os.kill(pid, sig)
+            logger.info("Killed leftover vLLM worker process %d", pid)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+
+
+def _atexit_cleanup() -> None:
+    """Last-resort cleanup: kill any vLLM workers still alive at interpreter exit."""
+    if _tracked_worker_pids:
+        logger.info(
+            "atexit: killing %d leftover vLLM worker process(es): %s",
+            len(_tracked_worker_pids),
+            sorted(_tracked_worker_pids),
+        )
+        _kill_pids(_tracked_worker_pids)
+        _tracked_worker_pids.clear()
+
+
+atexit.register(_atexit_cleanup)
+
 
 class VLLMModelBackend(ModelBackend):
     def __init__(
@@ -49,14 +95,26 @@ class VLLMModelBackend(ModelBackend):
         self._effective_gpu_memory_utilization = settings.vllm_gpu_memory_utilization
         self._selected_gpus: List[GPUDeviceInfo] = []
         self._inspected_gpus: List[GPUDeviceInfo] = []
+        self._worker_pids: Set[int] = set()
 
     async def start(self) -> None:
+        pids_before = _get_child_pids()
         await self._ensure_engine()
+        pids_after = _get_child_pids()
+        self._worker_pids = pids_after - pids_before
+        _tracked_worker_pids.update(self._worker_pids)
+        if self._worker_pids:
+            logger.info(
+                "Tracked %d vLLM worker process(es): %s",
+                len(self._worker_pids),
+                sorted(self._worker_pids),
+            )
 
     async def shutdown(self) -> None:
         engine = self._engine
         self._engine = None
         if engine is None:
+            self._cleanup_worker_processes()
             return
         shutdown_fn = getattr(engine, "shutdown", None)
         if callable(shutdown_fn):
@@ -64,10 +122,41 @@ class VLLMModelBackend(ModelBackend):
                 await asyncio.to_thread(shutdown_fn, 180.0)
             except Exception as exc:
                 logger.warning("vLLM engine shutdown failed: %s", exc)
+        else:
+            shutdown_background_loop = getattr(engine, "shutdown_background_loop", None)
+            if callable(shutdown_background_loop):
+                shutdown_background_loop()
+        self._cleanup_worker_processes()
+
+    def _cleanup_worker_processes(self) -> None:
+        """Force-kill any vLLM worker processes that survived graceful shutdown."""
+        if not self._worker_pids:
             return
-        shutdown_background_loop = getattr(engine, "shutdown_background_loop", None)
-        if callable(shutdown_background_loop):
-            shutdown_background_loop()
+        still_alive = set()
+        for pid in self._worker_pids:
+            try:
+                os.kill(pid, 0)  # Check if process exists
+                still_alive.add(pid)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+        if still_alive:
+            logger.info(
+                "Killing %d vLLM worker process(es) that survived engine shutdown: %s",
+                len(still_alive),
+                sorted(still_alive),
+            )
+            _kill_pids(still_alive, signal.SIGTERM)
+            # Give them a moment to exit gracefully, then SIGKILL
+            import time
+            time.sleep(0.5)
+            for pid in still_alive:
+                try:
+                    os.kill(pid, 0)
+                    os.kill(pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
+        _tracked_worker_pids.difference_update(self._worker_pids)
+        self._worker_pids.clear()
 
     async def generate(self, request: InferenceRequest) -> InferenceResult:
         prompt = self._resolve_prompt(request, use_messages=False)

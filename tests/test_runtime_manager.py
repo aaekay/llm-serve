@@ -266,3 +266,74 @@ def test_runtime_manager_logs_background_self_test_failure(tmp_path, caplog):
     assert "Startup self-test queued for model 'mock/default'" in caplog.text
     assert "Startup self-test started for model 'mock/default'" in caplog.text
     assert "Startup self-test failed for model 'mock/default'" in caplog.text
+
+
+def test_runtime_manager_startup_concurrency_test_sweeps_levels(tmp_path, caplog):
+    settings = make_settings(
+        tmp_path,
+        PROMPT_MAX_PARALLEL=4,
+        FOREGROUND_QUEUE_LIMIT=16,
+        STARTUP_SELF_TEST_ENABLED="false",
+        STARTUP_CONCURRENCY_TEST="true",
+    )
+
+    async def factory(model_id: str) -> ModelBackend:
+        return TrackingBackend(model_id, delay=0.01)
+
+    async def scenario():
+        runtime = RuntimeManager(settings, backend_factory=factory)
+        await runtime.startup()
+        await runtime.shutdown()
+
+    with caplog.at_level("INFO"):
+        asyncio.run(scenario())
+
+    assert "Startup Concurrency Test" in caplog.text
+    assert "Concurrency Test Complete" in caplog.text
+    for level in range(2, 5):
+        assert ("%-10d" % level).strip() in caplog.text
+
+
+def test_runtime_manager_startup_concurrency_test_skipped_when_disabled(tmp_path, caplog):
+    settings = make_settings(
+        tmp_path,
+        STARTUP_SELF_TEST_ENABLED="false",
+        STARTUP_CONCURRENCY_TEST="false",
+    )
+
+    async def factory(model_id: str) -> ModelBackend:
+        return TrackingBackend(model_id, delay=0.01)
+
+    async def scenario():
+        runtime = RuntimeManager(settings, backend_factory=factory)
+        await runtime.startup()
+        await runtime.shutdown()
+
+    with caplog.at_level("INFO"):
+        asyncio.run(scenario())
+
+    assert "Concurrency Test" not in caplog.text
+
+
+def test_runtime_manager_startup_concurrency_test_skipped_when_parallel_below_2(tmp_path, caplog):
+    settings = make_settings(
+        tmp_path,
+        PROMPT_MAX_PARALLEL=1,
+        FOREGROUND_QUEUE_LIMIT=16,
+        STARTUP_SELF_TEST_ENABLED="false",
+        STARTUP_CONCURRENCY_TEST="true",
+    )
+
+    async def factory(model_id: str) -> ModelBackend:
+        return TrackingBackend(model_id, delay=0.01)
+
+    async def scenario():
+        runtime = RuntimeManager(settings, backend_factory=factory)
+        await runtime.startup()
+        await runtime.shutdown()
+
+    with caplog.at_level("INFO"):
+        asyncio.run(scenario())
+
+    assert "Skipping startup concurrency test" in caplog.text
+    assert "Concurrency Test Complete" not in caplog.text

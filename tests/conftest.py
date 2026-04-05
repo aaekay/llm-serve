@@ -32,6 +32,7 @@ def make_settings(tmp_path: Path, **overrides: Any) -> Settings:
         "STARTUP_SELF_TEST_BLOCKING": "false",
         "STARTUP_SELF_TEST_PROMPT": "Write a thousand word poem about sunrise.",
         "STARTUP_SELF_TEST_MAX_OUTPUT_TOKENS": "128",
+        "STARTUP_CONCURRENCY_TEST": "false",
         "VLLM_DTYPE": "auto",
         "VLLM_TOKENIZER_MODE": "auto",
         "VLLM_TRUST_REMOTE_CODE": "false",

@@ -79,6 +79,7 @@ class Settings:
     startup_self_test_blocking: bool
     startup_self_test_prompt: str
     startup_self_test_max_output_tokens: int
+    startup_concurrency_test: bool
     vllm_dtype: str
     vllm_tokenizer_mode: str
     vllm_trust_remote_code: bool
@@ -171,6 +172,10 @@ class Settings:
                     "STARTUP_SELF_TEST_MAX_OUTPUT_TOKENS",
                     env_source.get("MAX_OUTPUT_TOKENS", "1024"),
                 )
+            ),
+            startup_concurrency_test=_parse_bool(
+                env_source.get("STARTUP_CONCURRENCY_TEST", "true"),
+                "STARTUP_CONCURRENCY_TEST",
             ),
             vllm_dtype=env_source.get("VLLM_DTYPE", "bfloat16"),
             vllm_tokenizer_mode=env_source.get("VLLM_TOKENIZER_MODE", "auto"),

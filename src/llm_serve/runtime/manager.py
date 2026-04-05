@@ -67,6 +67,15 @@ class RuntimeManager:
         logger.info("Default model '%s' is ready.", default_model_id)
         await self._start_startup_self_test()
 
+        if self.settings.startup_concurrency_test:
+            if self._startup_self_test_task and not self._startup_self_test_task.done():
+                logger.info("Waiting for startup self-test to finish before concurrency test.")
+                try:
+                    await self._startup_self_test_task
+                except Exception:
+                    pass
+            await self._run_startup_concurrency_test()
+
     async def shutdown(self) -> None:
         if self._startup_self_test_task and not self._startup_self_test_task.done():
             self._startup_self_test_task.cancel()
@@ -493,6 +502,60 @@ class RuntimeManager:
             raise
         except Exception:
             return
+
+    async def _run_startup_concurrency_test(self) -> None:
+        prompt = self.settings.startup_self_test_prompt.strip()
+        model_id = self.settings.effective_default_model_id
+        max_tokens = self.settings.startup_self_test_max_output_tokens
+        max_level = min(8, self.settings.prompt_max_parallel)
+
+        if max_level < 2:
+            logger.info(
+                "Skipping startup concurrency test: PROMPT_MAX_PARALLEL=%s is below minimum level 2.",
+                self.settings.prompt_max_parallel,
+            )
+            return
+
+        if not prompt:
+            logger.info("Skipping startup concurrency test: no self-test prompt configured.")
+            return
+
+        logger.info("")
+        logger.info("=== Startup Concurrency Test (model: %s) ===", model_id)
+        logger.info(
+            "%-10s  %-10s  %-14s  %-18s",
+            "Level", "Requests", "Wall-clock (s)", "Throughput (tok/s)",
+        )
+        logger.info("-" * 60)
+
+        for concurrency in range(2, max_level + 1):
+            requests = [
+                InferenceRequest(
+                    model_id=model_id,
+                    prompt=prompt,
+                    max_output_tokens=max_tokens,
+                    temperature=self.settings.default_temperature,
+                    top_p=self.settings.default_top_p,
+                    stream=False,
+                )
+                for _ in range(concurrency)
+            ]
+            started = time.perf_counter()
+            results = await asyncio.gather(
+                *[self.run_foreground(req) for req in requests]
+            )
+            elapsed = max(time.perf_counter() - started, 1e-9)
+            total_tokens = sum(r.completion_tokens for r in results)
+            throughput = total_tokens / elapsed
+
+            logger.info(
+                "%-10d  %-10d  %-14.2f  %-18.2f",
+                concurrency, concurrency, elapsed, throughput,
+            )
+
+        logger.info("-" * 60)
+        logger.info("=== Concurrency Test Complete ===")
+        logger.info("")
 
     async def _timeout_stream(self, stream: AsyncIterator[str], timeout: float) -> AsyncIterator[str]:
         ait = stream.__aiter__()

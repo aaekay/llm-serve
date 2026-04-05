@@ -257,6 +257,43 @@ def test_settings_defaults_vllm_dtype_to_bfloat16(tmp_path):
     assert settings.vllm_dtype == "bfloat16"
 
 
+def test_settings_parses_startup_concurrency_test(tmp_path):
+    off = Settings.load(
+        base_dir=tmp_path,
+        environ={
+            "DEFAULT_MODEL_ID": "mock/default",
+            "MODEL_ALLOWLIST": "mock/default,mock/reasoning",
+            "REASONING_MODEL_ALLOWLIST": "mock/reasoning",
+            "STARTUP_CONCURRENCY_TEST": "false",
+        },
+    )
+    on = Settings.load(
+        base_dir=tmp_path,
+        environ={
+            "DEFAULT_MODEL_ID": "mock/default",
+            "MODEL_ALLOWLIST": "mock/default,mock/reasoning",
+            "REASONING_MODEL_ALLOWLIST": "mock/reasoning",
+            "STARTUP_CONCURRENCY_TEST": "true",
+        },
+    )
+
+    assert off.startup_concurrency_test is False
+    assert on.startup_concurrency_test is True
+
+
+def test_settings_defaults_startup_concurrency_test_to_true(tmp_path):
+    settings = Settings.load(
+        base_dir=tmp_path,
+        environ={
+            "DEFAULT_MODEL_ID": "mock/default",
+            "MODEL_ALLOWLIST": "mock/default,mock/reasoning",
+            "REASONING_MODEL_ALLOWLIST": "mock/reasoning",
+        },
+    )
+
+    assert settings.startup_concurrency_test is True
+
+
 def test_settings_defaults_batch_max_parallel_to_4(tmp_path):
     settings = Settings.load(
         base_dir=tmp_path,
