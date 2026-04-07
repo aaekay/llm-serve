@@ -329,7 +329,7 @@ class VLLMModelBackend(ModelBackend):
                     "vLLM is not installed. Install the runtime dependencies before using INFERENCE_BACKEND=vllm."
                 ) from exc
 
-            engine_args = AsyncEngineArgs(
+            engine_kwargs = dict(
                 model=self.model_id,
                 tokenizer=self.model_id,
                 dtype=self._settings.vllm_dtype,
@@ -343,7 +343,14 @@ class VLLMModelBackend(ModelBackend):
                 skip_mm_profiling=self._settings.vllm_language_model_only,
                 gdn_prefill_backend=self._settings.vllm_gdn_prefill_backend,
                 disable_custom_all_reduce=self._settings.vllm_disable_custom_all_reduce,
+                enable_prefix_caching=self._settings.vllm_enable_prefix_caching,
+                enable_chunked_prefill=self._settings.vllm_enable_chunked_prefill,
+                max_num_seqs=self._settings.vllm_max_num_seqs,
+                max_num_batched_tokens=self._settings.vllm_max_num_batched_tokens,
             )
+            if self._settings.vllm_swap_space_gb is not None:
+                engine_kwargs["swap_space"] = self._settings.vllm_swap_space_gb
+            engine_args = AsyncEngineArgs(**engine_kwargs)
             try:
                 self._engine = AsyncLLMEngine.from_engine_args(engine_args)
             except Exception as exc:  # pragma: no cover

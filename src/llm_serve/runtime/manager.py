@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import statistics
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -522,11 +523,17 @@ class RuntimeManager:
         prompt = self.settings.startup_self_test_prompt.strip()
         model_id = self.settings.effective_default_model_id
         max_tokens = self.settings.startup_self_test_max_output_tokens
-        max_level = min(8, self.settings.prompt_max_parallel)
+        max_level = min(
+            self.settings.startup_concurrency_test_max_level,
+            self.settings.prompt_max_parallel,
+        )
 
         if max_level < 2:
             logger.info(
-                "Skipping startup concurrency test: PROMPT_MAX_PARALLEL=%s is below minimum level 2.",
+                "Skipping startup concurrency test: effective max level %s is below minimum 2 "
+                "(STARTUP_CONCURRENCY_TEST_MAX_LEVEL=%s, PROMPT_MAX_PARALLEL=%s).",
+                max_level,
+                self.settings.startup_concurrency_test_max_level,
                 self.settings.prompt_max_parallel,
             )
             return
@@ -535,15 +542,31 @@ class RuntimeManager:
             logger.info("Skipping startup concurrency test: no self-test prompt configured.")
             return
 
+        levels = [lvl for lvl in (2, 4, 8, 16, 24, 32) if lvl <= max_level]
+        if not levels or levels[-1] != max_level:
+            levels.append(max_level)
+        levels = sorted(set(levels))
+
         logger.info("")
         logger.info("=== Startup Concurrency Test (model: %s) ===", model_id)
         logger.info(
-            "%-10s  %-10s  %-14s  %-18s",
-            "Level", "Requests", "Wall-clock (s)", "Throughput (tok/s)",
+            "%-7s  %-9s  %-15s  %-20s  %-22s  %-22s",
+            "Level",
+            "Requests",
+            "Wall-clock (s)",
+            "Throughput (tok/s)",
+            "Per-req tok/s (median)",
+            "Per-req tok/s (p95)",
         )
-        logger.info("-" * 60)
+        logger.info("-" * 100)
 
-        for concurrency in range(2, max_level + 1):
+        async def _timed_run(req: InferenceRequest):
+            req_start = time.perf_counter()
+            result = await self.run_foreground(req)
+            req_latency = max(time.perf_counter() - req_start, 1e-9)
+            return result, req_latency
+
+        for concurrency in levels:
             requests = [
                 InferenceRequest(
                     model_id=model_id,
@@ -556,19 +579,38 @@ class RuntimeManager:
                 for _ in range(concurrency)
             ]
             started = time.perf_counter()
-            results = await asyncio.gather(
-                *[self.run_foreground(req) for req in requests]
-            )
+            timed = await asyncio.gather(*[_timed_run(req) for req in requests])
             elapsed = max(time.perf_counter() - started, 1e-9)
+
+            results = [item[0] for item in timed]
+            latencies = [item[1] for item in timed]
             total_tokens = sum(r.completion_tokens for r in results)
             throughput = total_tokens / elapsed
 
+            per_request_rates = [
+                (r.completion_tokens / lat) if lat > 0 else 0.0
+                for r, lat in zip(results, latencies)
+            ]
+            median_rate = statistics.median(per_request_rates) if per_request_rates else 0.0
+            if len(per_request_rates) >= 2:
+                sorted_rates = sorted(per_request_rates)
+                # Nearest-rank p95 (low estimate when n is small).
+                p95_index = max(0, int(round(0.95 * (len(sorted_rates) - 1))))
+                p95_rate = sorted_rates[p95_index]
+            else:
+                p95_rate = per_request_rates[0] if per_request_rates else 0.0
+
             logger.info(
-                "%-10d  %-10d  %-14.2f  %-18.2f",
-                concurrency, concurrency, elapsed, throughput,
+                "%-7d  %-9d  %-15.2f  %-20.2f  %-22.2f  %-22.2f",
+                concurrency,
+                concurrency,
+                elapsed,
+                throughput,
+                median_rate,
+                p95_rate,
             )
 
-        logger.info("-" * 60)
+        logger.info("-" * 100)
         logger.info("=== Concurrency Test Complete ===")
         logger.info("")
 

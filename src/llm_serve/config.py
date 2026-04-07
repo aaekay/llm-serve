@@ -89,6 +89,12 @@ class Settings:
     vllm_max_model_len: Optional[int]
     vllm_gdn_prefill_backend: Optional[str]
     vllm_disable_custom_all_reduce: bool
+    vllm_enable_prefix_caching: bool
+    vllm_enable_chunked_prefill: bool
+    vllm_max_num_seqs: int
+    vllm_max_num_batched_tokens: int
+    vllm_swap_space_gb: Optional[float]
+    startup_concurrency_test_max_level: int
     vllm_gpu_auto_select: bool
     cuda_visible_devices: Optional[str]
     vllm_gpu_count: int
@@ -207,6 +213,26 @@ class Settings:
                 env_source.get("VLLM_DISABLE_CUSTOM_ALL_REDUCE", "true"),
                 "VLLM_DISABLE_CUSTOM_ALL_REDUCE",
             ),
+            vllm_enable_prefix_caching=_parse_bool(
+                env_source.get("VLLM_ENABLE_PREFIX_CACHING", "true"),
+                "VLLM_ENABLE_PREFIX_CACHING",
+            ),
+            vllm_enable_chunked_prefill=_parse_bool(
+                env_source.get("VLLM_ENABLE_CHUNKED_PREFILL", "true"),
+                "VLLM_ENABLE_CHUNKED_PREFILL",
+            ),
+            vllm_max_num_seqs=int(env_source.get("VLLM_MAX_NUM_SEQS", "64")),
+            vllm_max_num_batched_tokens=int(
+                env_source.get("VLLM_MAX_NUM_BATCHED_TOKENS", "8192")
+            ),
+            vllm_swap_space_gb=(
+                float(env_source["VLLM_SWAP_SPACE_GB"])
+                if _optional_str(env_source.get("VLLM_SWAP_SPACE_GB")) is not None
+                else None
+            ),
+            startup_concurrency_test_max_level=int(
+                env_source.get("STARTUP_CONCURRENCY_TEST_MAX_LEVEL", "32")
+            ),
             vllm_gpu_auto_select=_parse_bool(
                 env_source.get("VLLM_GPU_AUTO_SELECT", "true"),
                 "VLLM_GPU_AUTO_SELECT",
@@ -315,6 +341,8 @@ class Settings:
             raise ValueError("STARTUP_SELF_TEST_MAX_OUTPUT_TOKENS must be at least 1")
         if self.startup_self_test_max_output_tokens > self.max_output_tokens:
             raise ValueError("STARTUP_SELF_TEST_MAX_OUTPUT_TOKENS cannot exceed MAX_OUTPUT_TOKENS")
+        if self.startup_concurrency_test_max_level < 2:
+            raise ValueError("STARTUP_CONCURRENCY_TEST_MAX_LEVEL must be at least 2")
         if self.foreground_queue_limit < 0:
             raise ValueError("FOREGROUND_QUEUE_LIMIT must be non-negative")
         if self.batch_queue_limit < 0:
@@ -356,6 +384,19 @@ class Settings:
             raise ValueError("CUDA_VISIBLE_DEVICES must list at least one device when set")
         if not self.vllm_gpu_auto_select and visible_devices and self.vllm_gpu_count > len(visible_devices):
             raise ValueError("VLLM_GPU_COUNT cannot exceed the number of CUDA_VISIBLE_DEVICES entries")
+        if self.vllm_max_num_seqs < 1:
+            raise ValueError("VLLM_MAX_NUM_SEQS must be at least 1")
+        if self.vllm_max_num_batched_tokens < 1:
+            raise ValueError("VLLM_MAX_NUM_BATCHED_TOKENS must be at least 1")
+        if (
+            self.vllm_max_model_len is not None
+            and self.vllm_max_num_batched_tokens < self.vllm_max_model_len
+        ):
+            raise ValueError(
+                "VLLM_MAX_NUM_BATCHED_TOKENS must be >= VLLM_MAX_MODEL_LEN"
+            )
+        if self.vllm_swap_space_gb is not None and self.vllm_swap_space_gb < 0:
+            raise ValueError("VLLM_SWAP_SPACE_GB must be non-negative when set")
 
     def _validate_allowed_default_model(self, model_id: str, env_var_name: str) -> None:
         if model_id not in self.model_allowlist:
