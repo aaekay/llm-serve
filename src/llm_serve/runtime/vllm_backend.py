@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import atexit
 import asyncio
+import collections
 import logging
 import os
 import signal
 import subprocess
 import uuid
-from typing import AsyncIterator, Callable, List, Optional, Set
+from typing import AsyncIterator, Callable, Dict, Iterable, List, Optional, Set
 
 from llm_serve.config import Settings
 from llm_serve.errors import BadRequestError, NotReadyError, UpstreamRuntimeError
@@ -34,20 +35,67 @@ logger = logging.getLogger(__name__)
 # Module-level set so the atexit handler can reach it even if the
 # VLLMModelBackend instance has been garbage-collected.
 _tracked_worker_pids: Set[int] = set()
+_tracked_worker_root_pids: Set[int] = set()
 
 
-def _get_child_pids() -> Set[int]:
-    """Return PIDs of all direct child processes of the current process."""
+def _parse_process_table(output: str) -> Dict[int, Set[int]]:
+    child_map: Dict[int, Set[int]] = collections.defaultdict(set)
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        parts = line.split()
+        if len(parts) != 2:
+            continue
+        try:
+            pid = int(parts[0])
+            parent_pid = int(parts[1])
+        except ValueError:
+            continue
+        child_map[parent_pid].add(pid)
+    return dict(child_map)
+
+
+def _get_process_children() -> Dict[int, Set[int]]:
     try:
         result = subprocess.run(
-            ["pgrep", "-P", str(os.getpid())],
+            ["ps", "-axo", "pid=,ppid="],
             capture_output=True,
             text=True,
             timeout=5,
+            check=True,
         )
-        return {int(pid) for pid in result.stdout.strip().split("\n") if pid.strip()}
+        return _parse_process_table(result.stdout)
     except Exception:
-        return set()
+        return {}
+
+
+def _get_child_pids(parent_pid: int) -> Set[int]:
+    """Return PIDs of all direct child processes of the given parent."""
+    return set(_get_process_children().get(parent_pid, set()))
+
+
+def _get_descendant_pids(root_pids: Iterable[int]) -> Set[int]:
+    """Return all descendants reachable from the given root PID set."""
+    child_map = _get_process_children()
+    descendants: Set[int] = set()
+    pending = list(root_pids)
+    while pending:
+        parent_pid = pending.pop()
+        for child_pid in child_map.get(parent_pid, set()):
+            if child_pid in descendants:
+                continue
+            descendants.add(child_pid)
+            pending.append(child_pid)
+    return descendants
+
+
+def _resolve_worker_pids(worker_pids: Set[int], worker_root_pids: Set[int]) -> Set[int]:
+    resolved = set(worker_pids)
+    resolved.update(worker_root_pids)
+    if worker_root_pids:
+        resolved.update(_get_descendant_pids(worker_root_pids))
+    return resolved
 
 
 def _kill_pids(pids: Set[int], sig: int = signal.SIGKILL) -> None:
@@ -55,21 +103,23 @@ def _kill_pids(pids: Set[int], sig: int = signal.SIGKILL) -> None:
     for pid in pids:
         try:
             os.kill(pid, sig)
-            logger.info("Killed leftover vLLM worker process %d", pid)
+            logger.info("Sent %s to leftover vLLM worker process %d", signal.Signals(sig).name, pid)
         except (ProcessLookupError, PermissionError, OSError):
             pass
 
 
 def _atexit_cleanup() -> None:
     """Last-resort cleanup: kill any vLLM workers still alive at interpreter exit."""
-    if _tracked_worker_pids:
+    tracked_pids = _resolve_worker_pids(_tracked_worker_pids, _tracked_worker_root_pids)
+    if tracked_pids:
         logger.info(
             "atexit: killing %d leftover vLLM worker process(es): %s",
-            len(_tracked_worker_pids),
-            sorted(_tracked_worker_pids),
+            len(tracked_pids),
+            sorted(tracked_pids),
         )
-        _kill_pids(_tracked_worker_pids)
+        _kill_pids(tracked_pids)
         _tracked_worker_pids.clear()
+        _tracked_worker_root_pids.clear()
 
 
 atexit.register(_atexit_cleanup)
@@ -95,20 +145,25 @@ class VLLMModelBackend(ModelBackend):
         self._effective_gpu_memory_utilization = settings.vllm_gpu_memory_utilization
         self._selected_gpus: List[GPUDeviceInfo] = []
         self._inspected_gpus: List[GPUDeviceInfo] = []
+        self._worker_root_pids: Set[int] = set()
         self._worker_pids: Set[int] = set()
 
     async def start(self) -> None:
-        pids_before = _get_child_pids()
-        await self._ensure_engine()
-        pids_after = _get_child_pids()
-        self._worker_pids = pids_after - pids_before
-        _tracked_worker_pids.update(self._worker_pids)
-        if self._worker_pids:
-            logger.info(
-                "Tracked %d vLLM worker process(es): %s",
-                len(self._worker_pids),
-                sorted(self._worker_pids),
+        child_pids_before = _get_child_pids(os.getpid())
+        descendant_pids_before = _get_descendant_pids({os.getpid()})
+        try:
+            await self._ensure_engine()
+        except BaseException:
+            self._capture_worker_processes(
+                child_pids_before=child_pids_before,
+                descendant_pids_before=descendant_pids_before,
             )
+            self._cleanup_worker_processes()
+            raise
+        self._capture_worker_processes(
+            child_pids_before=child_pids_before,
+            descendant_pids_before=descendant_pids_before,
+        )
 
     async def shutdown(self) -> None:
         engine = self._engine
@@ -128,12 +183,32 @@ class VLLMModelBackend(ModelBackend):
                 shutdown_background_loop()
         self._cleanup_worker_processes()
 
+    def _capture_worker_processes(
+        self,
+        *,
+        child_pids_before: Set[int],
+        descendant_pids_before: Set[int],
+    ) -> None:
+        self._worker_root_pids = _get_child_pids(os.getpid()) - child_pids_before
+        self._worker_pids = _get_descendant_pids({os.getpid()}) - descendant_pids_before
+        _tracked_worker_root_pids.update(self._worker_root_pids)
+        _tracked_worker_pids.update(self._worker_pids)
+        tracked_pids = _resolve_worker_pids(self._worker_pids, self._worker_root_pids)
+        if tracked_pids:
+            logger.info(
+                "Tracked %d vLLM worker process(es) across roots %s: %s",
+                len(tracked_pids),
+                sorted(self._worker_root_pids),
+                sorted(tracked_pids),
+            )
+
     def _cleanup_worker_processes(self) -> None:
         """Force-kill any vLLM worker processes that survived graceful shutdown."""
-        if not self._worker_pids:
+        tracked_pids = _resolve_worker_pids(self._worker_pids, self._worker_root_pids)
+        if not tracked_pids:
             return
         still_alive = set()
-        for pid in self._worker_pids:
+        for pid in tracked_pids:
             try:
                 os.kill(pid, 0)  # Check if process exists
                 still_alive.add(pid)
@@ -155,8 +230,10 @@ class VLLMModelBackend(ModelBackend):
                     os.kill(pid, signal.SIGKILL)
                 except (ProcessLookupError, PermissionError, OSError):
                     pass
-        _tracked_worker_pids.difference_update(self._worker_pids)
+        _tracked_worker_pids.difference_update(tracked_pids)
+        _tracked_worker_root_pids.difference_update(self._worker_root_pids)
         self._worker_pids.clear()
+        self._worker_root_pids.clear()
 
     async def generate(self, request: InferenceRequest) -> InferenceResult:
         prompt = self._resolve_prompt(request, use_messages=False)

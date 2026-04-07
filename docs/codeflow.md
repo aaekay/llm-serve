@@ -2,7 +2,7 @@
 
 ## Entry Points
 
-- Shell launcher: `run-server.sh` -> `uv run llm-serve` in the repo root without forcing backend-specific optional dependencies
+- Shell launcher: `run-server.sh` -> repo-local `.venv/bin/python -m llm_serve` when available, otherwise `uv run llm-serve`; the wrapper keeps a supervising shell alive so Ctrl+C can terminate the full server process group
 - Raw vLLM launcher: `run-qwen35-27b.sh` -> `vllm serve` only for direct debugging or benchmarking
 - CLI: `llm-serve` -> [`src/llm_serve/main.py`](/Users/aaekay/Documents/projects/llm-serve/src/llm_serve/main.py)
 - ASGI app factory: [`src/llm_serve/app.py`](/Users/aaekay/Documents/projects/llm-serve/src/llm_serve/app.py)
@@ -59,6 +59,7 @@
 5. If the model is active, the runtime manager enforces the configured concurrency lane and dispatches to the active backend.
 6. In `ollama` mode, direct non-batch requests use an upstream timeout policy with one longer retry before returning a timeout.
 7. The backend either runs vLLM locally or proxies to Ollama, then returns text or text chunks for the route to re-encode into OpenAI SSE or Ollama NDJSON/output JSON.
+8. If shutdown lands during a vLLM startup switch, the runtime manager now shuts down that partially started backend instead of dropping it on the floor.
 
 Relevant files:
 
@@ -74,7 +75,8 @@ Relevant files:
 3. The switch waits for in-flight backend usage to drain, starts the new backend, swaps the active model, and shuts down the old backend.
 4. In `ollama` mode, `/api/pull` is only an optional convenience proxy to the upstream Ollama daemon; normal inference still assumes the model may already be available there.
 5. In `vllm` mode, the first backend load may inspect host GPUs and derive a safe vLLM memory-utilization ratio before the engine starts.
-6. During the switch, requests for the target model receive `202`; conflicting switch requests receive `409`.
+6. vLLM worker tracking now snapshots descendant PIDs, not only direct children, so shutdown and atexit cleanup can still kill CUDA-owning grandchildren that outlive their immediate parent.
+7. During the switch, requests for the target model receive `202`; conflicting switch requests receive `409`.
 
 ## Batch Flow
 

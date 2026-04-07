@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
 import sys
 from types import ModuleType, SimpleNamespace
 
@@ -9,6 +10,7 @@ import pytest
 
 from llm_serve.errors import BadRequestError, NotReadyError
 from llm_serve.types import InferenceRequest
+from llm_serve.runtime import vllm_backend as vllm_backend_module
 from llm_serve.runtime.vllm_backend import VLLMModelBackend
 
 from .conftest import make_settings
@@ -773,6 +775,108 @@ def test_vllm_backend_thinking_enabled_without_reasoning_effort_stays_off(tmp_pa
 
     assert captured["template_kwargs"]["enable_thinking"] is False
     assert result.text == "Normal answer"
+
+
+def test_vllm_backend_start_failure_tracks_spawned_descendants_for_cleanup(tmp_path, monkeypatch):
+    captured = {}
+
+    class FakeAsyncEngineArgs:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class FakeAsyncLLMEngine:
+        @classmethod
+        def from_engine_args(cls, args):
+            raise RuntimeError("engine init exploded")
+
+    class FakeSamplingParams:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    child_snapshots = iter([{10}, {10, 11}])
+    descendant_snapshots = iter([{10, 12}, {10, 12, 11, 13}, {13}])
+
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm",
+        SimpleNamespace(
+            AsyncEngineArgs=FakeAsyncEngineArgs,
+            AsyncLLMEngine=FakeAsyncLLMEngine,
+            SamplingParams=FakeSamplingParams,
+        ),
+    )
+    monkeypatch.setattr(vllm_backend_module, "_get_child_pids", lambda parent_pid: next(child_snapshots))
+    monkeypatch.setattr(vllm_backend_module, "_get_descendant_pids", lambda root_pids: next(descendant_snapshots))
+
+    def fake_cleanup(self):
+        captured["roots"] = set(self._worker_root_pids)
+        captured["pids"] = set(self._worker_pids)
+        vllm_backend_module._tracked_worker_root_pids.clear()
+        vllm_backend_module._tracked_worker_pids.clear()
+        self._worker_root_pids.clear()
+        self._worker_pids.clear()
+
+    monkeypatch.setattr(VLLMModelBackend, "_cleanup_worker_processes", fake_cleanup)
+
+    settings = make_settings(
+        tmp_path,
+        INFERENCE_BACKEND="vllm",
+        VLLM_GPU_AUTO_SELECT="false",
+        CUDA_VISIBLE_DEVICES="0,1",
+        VLLM_GPU_COUNT=2,
+    )
+
+    backend = VLLMModelBackend("mock/reasoning", settings)
+
+    with pytest.raises(NotReadyError, match="engine init exploded"):
+        asyncio.run(backend.start())
+
+    assert captured["roots"] == {11}
+    assert captured["pids"] == {11, 13}
+
+
+def test_vllm_backend_cleanup_includes_descendants_of_tracked_roots(tmp_path, monkeypatch):
+    alive = {101, 102, 103}
+    delivered_signals = []
+
+    def fake_os_kill(pid, sig):
+        if sig == 0:
+            if pid not in alive:
+                raise ProcessLookupError
+            return None
+        delivered_signals.append((pid, sig))
+        if sig == signal.SIGKILL:
+            alive.discard(pid)
+        return None
+
+    monkeypatch.setattr(vllm_backend_module, "_get_descendant_pids", lambda root_pids: {102, 103})
+    monkeypatch.setattr("time.sleep", lambda _: None)
+    monkeypatch.setattr(os, "kill", fake_os_kill)
+
+    settings = make_settings(
+        tmp_path,
+        INFERENCE_BACKEND="vllm",
+        VLLM_GPU_AUTO_SELECT="false",
+        CUDA_VISIBLE_DEVICES="0,1",
+        VLLM_GPU_COUNT=2,
+    )
+
+    backend = VLLMModelBackend("mock/reasoning", settings)
+    backend._worker_root_pids = {101}
+    backend._worker_pids = {101, 102}
+    vllm_backend_module._tracked_worker_root_pids.update({101})
+    vllm_backend_module._tracked_worker_pids.update({101, 102})
+
+    backend._cleanup_worker_processes()
+
+    term_targets = {pid for pid, sig in delivered_signals if sig == signal.SIGTERM}
+    kill_targets = {pid for pid, sig in delivered_signals if sig == signal.SIGKILL}
+    assert term_targets == {101, 102, 103}
+    assert kill_targets == {101, 102, 103}
+    assert backend._worker_root_pids == set()
+    assert backend._worker_pids == set()
+    assert vllm_backend_module._tracked_worker_root_pids == set()
+    assert vllm_backend_module._tracked_worker_pids == set()
 
 
 def _gpu(index: int, total_mib: int, free_mib: int):

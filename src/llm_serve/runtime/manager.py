@@ -324,7 +324,14 @@ class RuntimeManager:
             finally:
                 await client.close()
         new_backend = await self._backend_factory(model_id)
-        await new_backend.start()
+        try:
+            await new_backend.start()
+        except BaseException:
+            await self._shutdown_backend_quietly(
+                new_backend,
+                context="partially started backend for '%s'" % model_id,
+            )
+            raise
         old_backend = self._active_backend
         self._active_backend = new_backend
         self._active_model_id = model_id
@@ -342,12 +349,20 @@ class RuntimeManager:
     def _clear_finished_switch(self, task: asyncio.Task[None]) -> None:
         try:
             task.result()
+        except asyncio.CancelledError:
+            pass
         except Exception as exc:
             self._last_switch_error = str(exc)
             self._switch_target_model = None
         finally:
             if self._switch_task is task:
                 self._switch_task = None
+
+    async def _shutdown_backend_quietly(self, backend: ModelBackend, *, context: str) -> None:
+        try:
+            await backend.shutdown()
+        except Exception as exc:
+            logger.warning("Backend shutdown failed while cleaning up %s: %s", context, exc)
 
     async def _default_factory(self, model_id: str) -> ModelBackend:
         if self.settings.inference_backend == "mock":

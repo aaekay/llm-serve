@@ -21,9 +21,10 @@ The default mock-safe code path exists to keep tests lightweight. For real model
 - `/healthz` reports `foreground_active`/`foreground_capacity` and `batch_active`/`batch_capacity`, so you can see whether work is actively overlapping or only queueing.
 - Batch uploads, metadata, and generated outputs are stored under `STORAGE_ROOT`.
 - In `vllm` mode, model downloads and Hugging Face cache files are stored under `MODEL_CACHE_DIR`, which defaults to the repo-local `data/models/`.
-- `run-server.sh` is the canonical API entrypoint for `/v1/*`, `/api/*`, files, batches, and health. It is the shell wrapper around `llm-serve`.
+- `run-server.sh` is the canonical API entrypoint for `/v1/*`, `/api/*`, files, batches, and health. It prefers the repo-local `.venv` Python when available, falls back to `uv run llm-serve`, and keeps a small shell supervisor alive so Ctrl+C can terminate the whole server process group.
 - `run-qwen35-27b.sh` is only for direct raw `vllm serve` debugging or benchmarking. It does not expose the full `llm-serve` API surface.
 - `run-server.sh` does not auto-install the vLLM optional dependency set. If you run `INFERENCE_BACKEND=vllm`, install it first with `uv sync --extra runtime`.
+- In `vllm` mode, an interrupted model startup now cleans up partially started worker descendants before the process exits, which prevents stale CUDA owners from lingering on the GPU after Ctrl+C.
 - In `ollama` mode, `llm-serve` treats Ollama as an already-running upstream service. It proxies inference, model tags, and optional `/api/pull` calls to `OLLAMA_BASE_URL` and does not host models or use Hugging Face/vLLM GPU settings locally.
 - For the Qwen/vLLM path, see [docs/qwen-vllm.md](docs/qwen-vllm.md) for the canonical model ID, reasoning behavior, and 2-GPU tuning notes.
 - With large Ollama-backed models such as `gpt-oss:120b`, higher `PROMPT_MAX_PARALLEL` usually buys less aggregate throughput than it costs in single-request token rate. If responsiveness matters more than bulk throughput, lower `PROMPT_MAX_PARALLEL` and/or choose a smaller model.

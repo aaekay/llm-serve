@@ -146,3 +146,26 @@
 - Result: no diff formatting issues.
 - Verified the launcher smoke test with `PORT=18425 INFERENCE_BACKEND=mock STARTUP_LOAD_DEFAULT_MODEL=false ./run-server.sh`.
 - Result: the server started successfully, reached application startup complete, and shut down cleanly on interrupt.
+
+## Ctrl+C GPU Cleanup
+
+- [x] Reproduce and explain why `run-server.sh` can leave a GPU process behind after Ctrl+C.
+- [x] Fix runtime shutdown so an interrupted vLLM startup cleans up partially started worker descendants.
+- [x] Harden `run-server.sh` so the launcher supervises the server process group and forwards shutdown signals.
+- [x] Add regression coverage plus docs updates, then run verification and record the results.
+
+- Review:
+- `run-server.sh` previously `exec`'d straight into the server, so there was no supervising parent shell left once the process tree was running. At the same time, the vLLM backend only tracked direct child PIDs after a successful startup snapshot, which left a hole for interrupted startup and deeper worker descendants.
+- Updated the runtime manager so cancelling a model switch now shuts down the partially started backend instead of dropping it during shutdown.
+- Updated the vLLM backend to snapshot descendant PIDs, keep tracked root PIDs for late-spawned descendants, and reuse that data in both normal shutdown and `atexit` cleanup.
+- Updated `run-server.sh` to keep a small shell supervisor alive, prefer the repo-local `.venv` Python when available, launch the server in its own bash job-control process group, and escalate from `TERM` to `KILL` if shutdown stalls.
+- Updated `README.md` and `docs/codeflow.md` to document the new Ctrl+C cleanup behavior and the launcher supervision model.
+- Ran `uv run pytest -q tests/test_runtime_manager.py tests/test_vllm_backend.py`.
+- Result: `26 passed in 2.52s`.
+- Ran `uv run pytest -q`.
+- Result: `72 passed in 2.93s`.
+- Ran `bash -n run-server.sh`.
+- Result: shell syntax check passed.
+- Ran `git diff --check`.
+- Result: no diff formatting issues.
+- Attempted a local `run-server.sh` smoke test with `INFERENCE_BACKEND=mock`, but this sandbox blocked binding `127.0.0.1:18525`, so full end-to-end interrupt verification could not be completed here.

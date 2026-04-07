@@ -56,6 +56,27 @@ class FailingSelfTestBackend(ModelBackend):
             yield ""
 
 
+class CancelledStartBackend(ModelBackend):
+    def __init__(self, model_id: str) -> None:
+        super().__init__(model_id)
+        self.start_entered = asyncio.Event()
+        self.shutdown_called = False
+
+    async def start(self) -> None:
+        self.start_entered.set()
+        await asyncio.Future()
+
+    async def shutdown(self) -> None:
+        self.shutdown_called = True
+
+    async def generate(self, request: InferenceRequest) -> InferenceResult:
+        raise AssertionError("generate should not be called")
+
+    async def generate_stream(self, request: InferenceRequest):
+        if False:
+            yield ""
+
+
 def test_runtime_manager_respects_parallel_limit(tmp_path):
     settings = make_settings(
         tmp_path,
@@ -337,3 +358,33 @@ def test_runtime_manager_startup_concurrency_test_skipped_when_parallel_below_2(
 
     assert "Skipping startup concurrency test" in caplog.text
     assert "Concurrency Test Complete" not in caplog.text
+
+
+def test_runtime_manager_shutdown_cleans_partially_started_backend(tmp_path):
+    settings = make_settings(
+        tmp_path,
+        STARTUP_LOAD_DEFAULT_MODEL="false",
+        STARTUP_SELF_TEST_ENABLED="false",
+    )
+    created = {}
+
+    async def factory(model_id: str) -> ModelBackend:
+        backend = CancelledStartBackend(model_id)
+        created["backend"] = backend
+        return backend
+
+    async def scenario():
+        runtime = RuntimeManager(settings, backend_factory=factory)
+        load_task = asyncio.create_task(runtime.ensure_loaded("mock/default"))
+        while "backend" not in created:
+            await asyncio.sleep(0)
+        backend = created["backend"]
+        await backend.start_entered.wait()
+        await runtime.shutdown()
+        with pytest.raises(asyncio.CancelledError):
+            await load_task
+        return backend.shutdown_called, runtime.active_model_id
+
+    shutdown_called, active_model_id = asyncio.run(scenario())
+    assert shutdown_called is True
+    assert active_model_id is None
