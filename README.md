@@ -42,4 +42,5 @@ The default mock-safe code path exists to keep tests lightweight. For real model
 - If you disable auto-selection, `CUDA_VISIBLE_DEVICES` is used directly and `VLLM_GPU_MEMORY_UTILIZATION` stays fixed.
 - In the default `VLLM_GPU_MODE=manual`, `VLLM_GPU_COUNT` maps to vLLM `tensor_parallel_size`. It must be compatible with the model; for example, a setting of `3` can fail on models whose tensor-parallel dimensions are not divisible by `3`.
 - Set `VLLM_GPU_MODE=auto` to reinterpret `VLLM_GPU_COUNT` as a total GPU budget. Auto mode benchmarks compatible tensor-parallel/replica layouts, persists the winner under `STORAGE_ROOT/tuning/`, and exposes it through `/healthz`.
+- Set `VLLM_GPU_MODE=fixed` with `VLLM_TENSOR_PARALLEL_SIZE` and `VLLM_REPLICA_COUNT` to force a worker layout without tuning. Their product must equal `VLLM_GPU_COUNT`; for example, TP=1 and replicas=4 creates four independent one-GPU workers.
 - `VLLM_DTYPE` defaults to `bfloat16`, which is optimal for Qwen3.5-27B inference speed on modern GPUs.

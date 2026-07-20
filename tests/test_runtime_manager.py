@@ -5,12 +5,29 @@ import asyncio
 import pytest
 
 from llm_serve.errors import TooManyRequestsError
+from llm_serve.runtime.autotune import FixedTopologyVLLMBackend
 from llm_serve.runtime.base import ModelBackend
 from llm_serve.runtime.manager import RuntimeManager
 from llm_serve.tokenization import estimate_text_tokens
 from llm_serve.types import InferenceRequest, InferenceResult
 
 from .conftest import make_settings
+
+
+def test_runtime_manager_selects_fixed_topology_backend(tmp_path):
+    settings = make_settings(
+        tmp_path,
+        INFERENCE_BACKEND="vllm",
+        VLLM_GPU_MODE="fixed",
+        VLLM_GPU_COUNT=4,
+        VLLM_TENSOR_PARALLEL_SIZE=1,
+        VLLM_REPLICA_COUNT=4,
+    )
+    runtime = RuntimeManager(settings)
+
+    backend = asyncio.run(runtime._default_factory(settings.effective_default_model_id))
+
+    assert isinstance(backend, FixedTopologyVLLMBackend)
 
 
 class TrackingBackend(ModelBackend):

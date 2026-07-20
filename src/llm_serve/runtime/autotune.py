@@ -17,6 +17,7 @@ from llm_serve.types import InferenceRequest, InferenceResult
 from .base import ModelBackend
 from .gpu_selection import (
     GPUDeviceInfo,
+    group_gpus_for_tensor_parallel,
     query_nvidia_smi_gpus,
     query_nvidia_smi_topology,
     derive_gpu_memory_utilization,
@@ -241,9 +242,11 @@ class AutoTunedVLLMBackend(ModelBackend):
     def tuning_snapshot(self) -> Dict[str, Any]:
         if self._pool is not None:
             snapshot = self._pool.tuning_snapshot
+            snapshot["mode"] = "auto"
             snapshot["status"] = self._status if self._status != "ready" else snapshot["status"]
             return snapshot
         return {
+            "mode": "auto",
             "status": self._status,
             "profile_valid": self._profile is not None,
             "tensor_parallel_size": None,
@@ -353,6 +356,104 @@ class AutoTunedVLLMBackend(ModelBackend):
     def _require_pool(self) -> VLLMPoolBackend:
         if self._pool is None:
             raise NotReadyError("The auto-tuned vLLM worker pool is not ready")
+        return self._pool
+
+
+class FixedTopologyVLLMBackend(AutoTunedVLLMBackend):
+    """Run an explicitly configured tensor-parallel/replica topology without tuning."""
+
+    @property
+    def tuning_snapshot(self) -> Dict[str, Any]:
+        snapshot = super().tuning_snapshot
+        snapshot["mode"] = "fixed"
+        return snapshot
+
+    async def start(self) -> None:
+        self._status = "inspecting"
+        _validate_vllm_version(self.model_id)
+        inspected = self.gpu_query_fn()
+        try:
+            selected = _select_gpu_budget(inspected, self.settings)
+        except ValueError as exc:
+            raise NotReadyError("Could not select fixed topology GPU budget: %s" % exc) from exc
+        try:
+            effective_utilization, _ = derive_gpu_memory_utilization(
+                selected,
+                self.settings.vllm_gpu_memory_utilization,
+                self.settings.vllm_gpu_memory_reserve_fraction,
+                self.settings.vllm_gpu_memory_utilization_min,
+            )
+        except ValueError as exc:
+            raise NotReadyError(
+                "Selected fixed topology GPUs do not have enough free memory: %s" % exc
+            ) from exc
+
+        tensor_parallel_size = self.settings.vllm_tensor_parallel_size
+        replica_count = self.settings.vllm_replica_count
+        if tensor_parallel_size is None or replica_count is None:
+            raise NotReadyError(
+                "Fixed topology requires VLLM_TENSOR_PARALLEL_SIZE and VLLM_REPLICA_COUNT"
+            )
+        try:
+            link_scores = self.topology_query_fn()
+        except Exception as exc:
+            logger.warning("GPU topology inspection failed; using index grouping: %s", exc)
+            link_scores = {}
+        try:
+            groups = group_gpus_for_tensor_parallel(
+                selected,
+                tensor_parallel_size,
+                link_scores,
+            )
+        except ValueError as exc:
+            raise NotReadyError("Invalid fixed vLLM topology: %s" % exc) from exc
+        if len(groups) != replica_count:
+            raise NotReadyError(
+                "Fixed topology produced %s replicas, but VLLM_REPLICA_COUNT=%s"
+                % (len(groups), replica_count)
+            )
+
+        runtime_settings = replace(
+            self.settings,
+            vllm_gpu_memory_utilization=effective_utilization,
+        )
+        topology = WorkerTopology(
+            tensor_parallel_size=tensor_parallel_size,
+            gpu_groups=[[gpu.index for gpu in group] for group in groups],
+        )
+        self._status = "starting"
+        pool = self.pool_factory(
+            self.model_id,
+            runtime_settings,
+            topology,
+            optimized_engine=True,
+        )
+        try:
+            await pool.start()
+        except Exception as optimized_exc:
+            await pool.shutdown()
+            logger.warning(
+                "Optimized vLLM flags failed for fixed topology %s; retrying safe settings: %s",
+                topology.label,
+                optimized_exc,
+            )
+            pool = self.pool_factory(
+                self.model_id,
+                runtime_settings,
+                topology,
+                optimized_engine=False,
+            )
+            try:
+                await pool.start()
+            except BaseException:
+                await pool.shutdown()
+                raise
+        self._pool = pool
+        self._status = "ready"
+
+    def _require_pool(self) -> VLLMPoolBackend:
+        if self._pool is None:
+            raise NotReadyError("The fixed-topology vLLM worker pool is not ready")
         return self._pool
 
 

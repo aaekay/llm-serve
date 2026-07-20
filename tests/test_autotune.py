@@ -7,7 +7,7 @@ import pytest
 
 from llm_serve.errors import NotReadyError
 from llm_serve.runtime import autotune
-from llm_serve.runtime.autotune import AutoTunedVLLMBackend
+from llm_serve.runtime.autotune import AutoTunedVLLMBackend, FixedTopologyVLLMBackend
 from llm_serve.runtime.gpu_selection import GPUDeviceInfo
 from llm_serve.runtime.throughput import (
     BenchmarkMeasurement,
@@ -24,10 +24,15 @@ from .conftest import make_settings
 
 class FakePool:
     starts = 0
+    instances = []
 
     def __init__(self, model_id, settings, topology, *, optimized_engine=True, profile=None):
+        self.model_id = model_id
+        self.settings = settings
         self.topology = topology
+        self.optimized_engine = optimized_engine
         self.profile = profile
+        type(self).instances.append(self)
 
     @property
     def tuning_snapshot(self):
@@ -122,3 +127,43 @@ def test_auto_backend_reuses_matching_profile_without_retuning(tmp_path, monkeyp
     assert FakePool.starts == 1
     assert snapshot["profile_valid"] is True
     assert snapshot["tensor_parallel_size"] == 2
+
+
+def test_fixed_backend_starts_requested_tp1_r4_topology(tmp_path, monkeypatch):
+    settings = make_settings(
+        tmp_path,
+        INFERENCE_BACKEND="vllm",
+        VLLM_GPU_MODE="fixed",
+        VLLM_GPU_COUNT=4,
+        VLLM_TENSOR_PARALLEL_SIZE=1,
+        VLLM_REPLICA_COUNT=4,
+        DEFAULT_MODEL_ID="google/gemma-4-12B-it",
+        MODEL_ALLOWLIST="google/gemma-4-12B-it",
+        REASONING_MODEL_ALLOWLIST="",
+    )
+    gpus = [_gpu(index) for index in range(4)]
+    monkeypatch.setattr(autotune.importlib.metadata, "version", lambda package: "0.23.0")
+    FakePool.starts = 0
+    FakePool.instances = []
+    backend = FixedTopologyVLLMBackend(
+        settings.effective_default_model_id,
+        settings,
+        gpu_query_fn=lambda: gpus,
+        topology_query_fn=lambda: {},
+        pool_factory=FakePool,
+    )
+
+    async def scenario():
+        await backend.start()
+        snapshot = backend.tuning_snapshot
+        await backend.shutdown()
+        return snapshot
+
+    snapshot = asyncio.run(scenario())
+
+    assert FakePool.starts == 1
+    assert FakePool.instances[0].topology == WorkerTopology(1, [[0], [1], [2], [3]])
+    assert snapshot["mode"] == "fixed"
+    assert snapshot["profile_valid"] is False
+    assert snapshot["tensor_parallel_size"] == 1
+    assert snapshot["replica_count"] == 4

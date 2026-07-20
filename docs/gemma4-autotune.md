@@ -10,6 +10,17 @@ uv sync --extra runtime --upgrade-package vllm
 
 Set `HF_TOKEN` before the first run to avoid unauthenticated Hub rate limits while the model files are downloaded.
 
+The native Gemma 4 path may JIT-compile CUDA components on startup. The host therefore needs the CUDA toolkit—not only an NVIDIA driver—and `CUDA_HOME/bin/nvcc` must exist. Check the CUDA version expected by the installed PyTorch build and verify the compiler before tuning:
+
+```bash
+python -c 'import torch; print(torch.version.cuda)'
+command -v nvcc
+echo "$CUDA_HOME"
+"$CUDA_HOME/bin/nvcc" --version
+```
+
+Load or install the matching toolkit, then export `CUDA_HOME`, prepend its `bin` directory to `PATH`, and add its `lib64` directory to `LD_LIBRARY_PATH`. On managed workstations this is often provided through a CUDA environment module; otherwise use the NVIDIA CUDA repository packages for the host distribution.
+
 For four 24 GB NVIDIA GPUs and text-only BF16 serving, start with:
 
 ```dotenv
@@ -62,3 +73,19 @@ Override it with `VLLM_AUTOTUNE_WORKLOAD_FILE`. The file may contain a list dire
 Profiles live under `data/runtime/tuning/` by default. They are invalidated when the model revision, vLLM version, GPU identity/topology, effective memory allocation, benchmark workload, latency target, context length, or scheduler limits change.
 
 `GET /healthz` reports the selected tensor-parallel size, replica count, tuned foreground concurrency, measured throughput, latency ratio, and unhealthy worker count. Batch requests use otherwise-idle capacity and stop being admitted whenever foreground work is queued.
+
+## Force a topology without tuning
+
+If one complete model plus its KV cache fits comfortably on each GPU, force four independent one-GPU replicas with:
+
+```dotenv
+VLLM_GPU_MODE=fixed
+VLLM_GPU_COUNT=4
+VLLM_TENSOR_PARALLEL_SIZE=1
+VLLM_REPLICA_COUNT=4
+PROMPT_MAX_PARALLEL=32
+```
+
+Fixed mode skips topology and concurrency benchmarking. It selects four GPUs, starts one vLLM worker on each GPU, and load-balances requests across them. `VLLM_TENSOR_PARALLEL_SIZE * VLLM_REPLICA_COUNT` must equal `VLLM_GPU_COUNT`, so an invalid layout fails during configuration instead of silently leaving GPUs unused. `PROMPT_MAX_PARALLEL` remains the gateway concurrency limit because fixed mode has no measured concurrency profile.
+
+Other four-GPU layouts are `VLLM_TENSOR_PARALLEL_SIZE=2` with `VLLM_REPLICA_COUNT=2`, or `VLLM_TENSOR_PARALLEL_SIZE=4` with `VLLM_REPLICA_COUNT=1`.

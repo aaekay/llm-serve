@@ -372,3 +372,53 @@ def test_settings_reject_invalid_vllm_gpu_mode(tmp_path):
                 "VLLM_GPU_MODE": "fastest",
             },
         )
+
+
+def test_settings_loads_fixed_vllm_topology(tmp_path):
+    settings = Settings.load(
+        base_dir=tmp_path,
+        environ={
+            "INFERENCE_BACKEND": "vllm",
+            "DEFAULT_MODEL_ID": "model",
+            "MODEL_ALLOWLIST": "model",
+            "REASONING_MODEL_ALLOWLIST": "",
+            "VLLM_GPU_MODE": "fixed",
+            "VLLM_GPU_COUNT": "4",
+            "VLLM_TENSOR_PARALLEL_SIZE": "1",
+            "VLLM_REPLICA_COUNT": "4",
+        },
+    )
+
+    assert settings.vllm_gpu_mode == "fixed"
+    assert settings.vllm_tensor_parallel_size == 1
+    assert settings.vllm_replica_count == 4
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"VLLM_REPLICA_COUNT": "4"}, "VLLM_TENSOR_PARALLEL_SIZE"),
+        ({"VLLM_TENSOR_PARALLEL_SIZE": "1"}, "VLLM_REPLICA_COUNT"),
+        (
+            {"VLLM_TENSOR_PARALLEL_SIZE": "2", "VLLM_REPLICA_COUNT": "1"},
+            "must equal VLLM_GPU_COUNT",
+        ),
+    ],
+)
+def test_settings_rejects_incomplete_or_inconsistent_fixed_topology(
+    tmp_path,
+    overrides,
+    message,
+):
+    environ = {
+        "INFERENCE_BACKEND": "vllm",
+        "DEFAULT_MODEL_ID": "model",
+        "MODEL_ALLOWLIST": "model",
+        "REASONING_MODEL_ALLOWLIST": "",
+        "VLLM_GPU_MODE": "fixed",
+        "VLLM_GPU_COUNT": "4",
+        **overrides,
+    }
+
+    with pytest.raises(ValueError, match=message):
+        Settings.load(base_dir=tmp_path, environ=environ)

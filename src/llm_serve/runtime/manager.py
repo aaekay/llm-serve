@@ -18,7 +18,7 @@ from llm_serve.errors import (
 from llm_serve.types import InferenceRequest, InferenceResult, LoadStatus, StartupSelfTestResult
 
 from .base import ModelBackend
-from .autotune import AutoTunedVLLMBackend
+from .autotune import AutoTunedVLLMBackend, FixedTopologyVLLMBackend
 from .mock import MockModelBackend
 from .ollama_backend import OllamaAPIClient, OllamaModelBackend
 from .vllm_backend import VLLMModelBackend
@@ -416,6 +416,8 @@ class RuntimeManager:
             )
         if self.settings.vllm_gpu_mode == "auto":
             return AutoTunedVLLMBackend(model_id, self.settings)
+        if self.settings.vllm_gpu_mode == "fixed":
+            return FixedTopologyVLLMBackend(model_id, self.settings)
         return VLLMModelBackend(
             model_id,
             self.settings,
@@ -435,7 +437,10 @@ class RuntimeManager:
         self._total_semaphore = asyncio.Semaphore(self._total_capacity)
 
     def _throughput_tuning_snapshot(self) -> Dict[str, object]:
-        if self.settings.inference_backend != "vllm" or self.settings.vllm_gpu_mode != "auto":
+        if self.settings.inference_backend != "vllm" or self.settings.vllm_gpu_mode not in {
+            "auto",
+            "fixed",
+        }:
             return {"status": "disabled", "profile_valid": False}
         backend = self._active_backend
         snapshot = getattr(backend, "tuning_snapshot", None) if backend is not None else None

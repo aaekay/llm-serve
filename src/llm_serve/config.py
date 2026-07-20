@@ -99,6 +99,8 @@ class Settings:
     vllm_gpu_auto_select: bool
     cuda_visible_devices: Optional[str]
     vllm_gpu_count: int
+    vllm_tensor_parallel_size: Optional[int]
+    vllm_replica_count: Optional[int]
     vllm_gpu_memory_utilization: float
     vllm_gpu_memory_utilization_min: float
     vllm_gpu_memory_reserve_fraction: float
@@ -247,6 +249,16 @@ class Settings:
             ),
             cuda_visible_devices=_optional_str(env_source.get("CUDA_VISIBLE_DEVICES")),
             vllm_gpu_count=int(env_source.get("VLLM_GPU_COUNT", "1")),
+            vllm_tensor_parallel_size=(
+                int(env_source["VLLM_TENSOR_PARALLEL_SIZE"])
+                if _optional_str(env_source.get("VLLM_TENSOR_PARALLEL_SIZE")) is not None
+                else None
+            ),
+            vllm_replica_count=(
+                int(env_source["VLLM_REPLICA_COUNT"])
+                if _optional_str(env_source.get("VLLM_REPLICA_COUNT")) is not None
+                else None
+            ),
             vllm_gpu_memory_utilization=float(env_source.get("VLLM_GPU_MEMORY_UTILIZATION", "0.9")),
             vllm_gpu_memory_utilization_min=float(
                 env_source.get("VLLM_GPU_MEMORY_UTILIZATION_MIN", "0.5")
@@ -394,10 +406,27 @@ class Settings:
             raise ValueError("OLLAMA_BATCH_RETRY_MAX_OUTPUT_TOKENS must be at least 1")
         if self.inference_backend != "vllm":
             return
-        if self.vllm_gpu_mode not in {"manual", "auto"}:
-            raise ValueError("VLLM_GPU_MODE must be 'manual' or 'auto'")
+        if self.vllm_gpu_mode not in {"manual", "auto", "fixed"}:
+            raise ValueError("VLLM_GPU_MODE must be 'manual', 'auto', or 'fixed'")
         if self.vllm_gpu_count < 1:
             raise ValueError("VLLM_GPU_COUNT must be at least 1")
+        if self.vllm_gpu_mode == "fixed":
+            if self.vllm_tensor_parallel_size is None:
+                raise ValueError(
+                    "VLLM_TENSOR_PARALLEL_SIZE must be set when VLLM_GPU_MODE=fixed"
+                )
+            if self.vllm_replica_count is None:
+                raise ValueError("VLLM_REPLICA_COUNT must be set when VLLM_GPU_MODE=fixed")
+            if self.vllm_tensor_parallel_size < 1:
+                raise ValueError("VLLM_TENSOR_PARALLEL_SIZE must be at least 1")
+            if self.vllm_replica_count < 1:
+                raise ValueError("VLLM_REPLICA_COUNT must be at least 1")
+            fixed_gpu_count = self.vllm_tensor_parallel_size * self.vllm_replica_count
+            if fixed_gpu_count != self.vllm_gpu_count:
+                raise ValueError(
+                    "VLLM_TENSOR_PARALLEL_SIZE * VLLM_REPLICA_COUNT must equal "
+                    "VLLM_GPU_COUNT when VLLM_GPU_MODE=fixed"
+                )
         if self.vllm_autotune_slo_multiplier < 1:
             raise ValueError("VLLM_AUTOTUNE_SLO_MULTIPLIER must be at least 1")
         if self.vllm_autotune_max_concurrency < 1:
