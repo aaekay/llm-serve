@@ -44,6 +44,16 @@ class TrackingBackend(ModelBackend):
         yield "ok"
 
 
+class TunedTrackingBackend(TrackingBackend):
+    @property
+    def effective_foreground_concurrency(self) -> int:
+        return 3
+
+    @property
+    def tuning_snapshot(self):
+        return {"status": "ready", "profile_valid": True, "foreground_concurrency": 3}
+
+
 class FailingSelfTestBackend(ModelBackend):
     async def shutdown(self) -> None:
         return None
@@ -108,6 +118,39 @@ def test_runtime_manager_respects_parallel_limit(tmp_path):
         return backend.max_active
 
     assert asyncio.run(scenario()) == 2
+
+
+def test_runtime_manager_applies_tuned_backend_capacity(tmp_path):
+    settings = make_settings(
+        tmp_path,
+        INFERENCE_BACKEND="vllm",
+        VLLM_GPU_MODE="auto",
+        PROMPT_MAX_PARALLEL=8,
+        FOREGROUND_QUEUE_LIMIT=10,
+        STARTUP_SELF_TEST_ENABLED="false",
+        STARTUP_CONCURRENCY_TEST="false",
+    )
+    created = {}
+
+    async def factory(model_id: str) -> ModelBackend:
+        backend = TunedTrackingBackend(model_id)
+        created["backend"] = backend
+        return backend
+
+    async def scenario():
+        runtime = RuntimeManager(settings, backend_factory=factory)
+        await runtime.startup()
+        request = InferenceRequest("mock/default", "hello", 16, 0.2, 0.95, False)
+        await asyncio.gather(*[runtime.run_foreground(request) for _ in range(6)])
+        snapshot = runtime.health_snapshot()
+        await runtime.shutdown()
+        return created["backend"].max_active, snapshot
+
+    max_active, snapshot = asyncio.run(scenario())
+
+    assert max_active == 3
+    assert snapshot["foreground_capacity"] == 3
+    assert snapshot["throughput_tuning"]["profile_valid"] is True
 
 
 def test_runtime_manager_rejects_when_foreground_queue_is_full(tmp_path):

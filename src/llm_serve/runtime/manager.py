@@ -18,6 +18,7 @@ from llm_serve.errors import (
 from llm_serve.types import InferenceRequest, InferenceResult, LoadStatus, StartupSelfTestResult
 
 from .base import ModelBackend
+from .autotune import AutoTunedVLLMBackend
 from .mock import MockModelBackend
 from .ollama_backend import OllamaAPIClient, OllamaModelBackend
 from .vllm_backend import VLLMModelBackend
@@ -53,8 +54,11 @@ class RuntimeManager:
         self._foreground_pending = 0
         self._batch_pending = 0
         self._pending_lock = asyncio.Lock()
-        self._foreground_semaphore = asyncio.Semaphore(settings.prompt_max_parallel)
+        self._foreground_capacity = settings.prompt_max_parallel
+        self._foreground_semaphore = asyncio.Semaphore(self._foreground_capacity)
         self._batch_semaphore = asyncio.Semaphore(settings.batch_max_parallel)
+        self._total_capacity = settings.prompt_max_parallel + settings.batch_max_parallel
+        self._total_semaphore = asyncio.Semaphore(self._total_capacity)
 
     async def startup(self) -> None:
         if not self.settings.startup_load_default_model:
@@ -68,7 +72,9 @@ class RuntimeManager:
         logger.info("Default model '%s' is ready.", default_model_id)
         await self._start_startup_self_test()
 
-        if self.settings.startup_concurrency_test:
+        if self.settings.startup_concurrency_test and not (
+            self.settings.inference_backend == "vllm" and self.settings.vllm_gpu_mode == "auto"
+        ):
             if self._startup_self_test_task and not self._startup_self_test_task.done():
                 logger.info("Waiting for startup self-test to finish before concurrency test.")
                 try:
@@ -209,11 +215,16 @@ class RuntimeManager:
 
     async def stream_foreground(self, request: InferenceRequest) -> AsyncIterator[str]:
         async with self._pending_lock:
-            if self._foreground_pending >= self.settings.prompt_max_parallel + self.settings.foreground_queue_limit:
+            if self._foreground_pending >= self._foreground_capacity + self.settings.foreground_queue_limit:
                 raise TooManyRequestsError("Foreground queue is full")
             self._foreground_pending += 1
-        await self._foreground_semaphore.acquire()
+        foreground_acquired = False
+        total_acquired = False
         try:
+            await self._foreground_semaphore.acquire()
+            foreground_acquired = True
+            await self._total_semaphore.acquire()
+            total_acquired = True
             async with self._backend_usage():
                 backend = self._require_active_backend(request.model_id)
                 use_chat = request.messages is not None
@@ -227,7 +238,10 @@ class RuntimeManager:
         finally:
             async with self._pending_lock:
                 self._foreground_pending -= 1
-            self._foreground_semaphore.release()
+            if total_acquired:
+                self._total_semaphore.release()
+            if foreground_acquired:
+                self._foreground_semaphore.release()
 
     async def run_batch(self, request: InferenceRequest) -> InferenceResult:
         return await self._run_request(
@@ -246,7 +260,7 @@ class RuntimeManager:
         return self._switch_task is not None and not self._switch_task.done()
 
     def queue_depth(self) -> int:
-        queued = self._foreground_pending - self.settings.prompt_max_parallel
+        queued = self._foreground_pending - self._foreground_capacity
         return max(0, queued)
 
     def batch_queue_depth(self) -> int:
@@ -254,7 +268,7 @@ class RuntimeManager:
         return max(0, queued)
 
     def foreground_active(self) -> int:
-        return min(self._foreground_pending, self.settings.prompt_max_parallel)
+        return min(self._foreground_pending, self._foreground_capacity)
 
     def batch_active(self) -> int:
         return min(self._batch_pending, self.settings.batch_max_parallel)
@@ -265,7 +279,7 @@ class RuntimeManager:
             "model_id": self._active_model_id,
             "inference_backend": self.settings.inference_backend,
             "foreground_active": self.foreground_active(),
-            "foreground_capacity": self.settings.prompt_max_parallel,
+            "foreground_capacity": self._foreground_capacity,
             "queue_depth": self.queue_depth(),
             "batch_active": self.batch_active(),
             "batch_capacity": self.settings.batch_max_parallel,
@@ -274,6 +288,7 @@ class RuntimeManager:
             "switch_target_model": self._switch_target_model,
             "last_switch_error": self._last_switch_error,
             "startup_self_test": self._serialize_startup_self_test(),
+            "throughput_tuning": self._throughput_tuning_snapshot(),
         }
 
     async def _run_request(
@@ -285,7 +300,7 @@ class RuntimeManager:
     ) -> InferenceResult:
         pending_attr = "_foreground_pending" if lane == "foreground" else "_batch_pending"
         limit = (
-            self.settings.prompt_max_parallel + self.settings.foreground_queue_limit
+            self._foreground_capacity + self.settings.foreground_queue_limit
             if lane == "foreground"
             else self.settings.batch_max_parallel + self.settings.batch_queue_limit
         )
@@ -295,8 +310,29 @@ class RuntimeManager:
                 raise TooManyRequestsError("%s queue is full" % lane.capitalize())
             setattr(self, pending_attr, getattr(self, pending_attr) + 1)
 
-        await semaphore.acquire()
+        lane_acquired = False
+        total_acquired = False
         try:
+            await semaphore.acquire()
+            lane_acquired = True
+            prioritize_foreground = (
+                lane == "batch"
+                and self.settings.inference_backend == "vllm"
+                and self.settings.vllm_gpu_mode == "auto"
+            )
+            if prioritize_foreground:
+                while True:
+                    while self._foreground_pending > 0:
+                        await asyncio.sleep(0.01)
+                    await self._total_semaphore.acquire()
+                    total_acquired = True
+                    if self._foreground_pending == 0:
+                        break
+                    self._total_semaphore.release()
+                    total_acquired = False
+            else:
+                await self._total_semaphore.acquire()
+                total_acquired = True
             if wait_for_model:
                 await self.ensure_loaded(request.model_id)
             return await self._generate_with_active_backend(request)
@@ -305,7 +341,10 @@ class RuntimeManager:
         finally:
             async with self._pending_lock:
                 setattr(self, pending_attr, getattr(self, pending_attr) - 1)
-            semaphore.release()
+            if total_acquired:
+                self._total_semaphore.release()
+            if lane_acquired:
+                semaphore.release()
 
     async def _await_switch(self, task: Optional[asyncio.Task[None]]) -> None:
         if task is None:
@@ -337,6 +376,7 @@ class RuntimeManager:
         self._active_backend = new_backend
         self._active_model_id = model_id
         self._switch_target_model = model_id
+        self._apply_backend_capacity(new_backend)
         if old_backend is not None:
             await old_backend.shutdown()
 
@@ -374,11 +414,34 @@ class RuntimeManager:
                 self.settings,
                 client_factory=self._ollama_client_factory,
             )
+        if self.settings.vllm_gpu_mode == "auto":
+            return AutoTunedVLLMBackend(model_id, self.settings)
         return VLLMModelBackend(
             model_id,
             self.settings,
             enable_adaptive_gpu_selection=self._active_backend is None,
         )
+
+    def _apply_backend_capacity(self, backend: ModelBackend) -> None:
+        configured = getattr(backend, "effective_foreground_concurrency", None)
+        capacity = configured if isinstance(configured, int) and configured > 0 else self.settings.prompt_max_parallel
+        self._foreground_capacity = capacity
+        self._foreground_semaphore = asyncio.Semaphore(capacity)
+        self._total_capacity = (
+            capacity
+            if isinstance(configured, int) and configured > 0
+            else self.settings.prompt_max_parallel + self.settings.batch_max_parallel
+        )
+        self._total_semaphore = asyncio.Semaphore(self._total_capacity)
+
+    def _throughput_tuning_snapshot(self) -> Dict[str, object]:
+        if self.settings.inference_backend != "vllm" or self.settings.vllm_gpu_mode != "auto":
+            return {"status": "disabled", "profile_valid": False}
+        backend = self._active_backend
+        snapshot = getattr(backend, "tuning_snapshot", None) if backend is not None else None
+        if isinstance(snapshot, dict):
+            return snapshot
+        return {"status": "pending", "profile_valid": False}
 
     def _require_active_backend(self, model_id: str) -> ModelBackend:
         if self._active_backend is None or self._active_model_id != model_id:

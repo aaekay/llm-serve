@@ -3,9 +3,10 @@ from __future__ import annotations
 import csv
 import io
 import os
+import itertools
 import subprocess
 from dataclasses import dataclass
-from typing import List, Sequence, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 
 @dataclass(frozen=True)
@@ -79,6 +80,89 @@ def query_nvidia_smi_gpus() -> List[GPUDeviceInfo]:
         detail = exc.stderr.strip() or exc.stdout.strip() or str(exc)
         raise RuntimeError("nvidia-smi failed: %s" % detail) from exc
     return parse_nvidia_smi_csv(completed.stdout)
+
+
+def query_nvidia_smi_topology() -> Dict[Tuple[int, int], int]:
+    """Return pairwise link scores; larger means a better tensor-parallel link."""
+    try:
+        completed = subprocess.run(
+            ["nvidia-smi", "topo", "-m"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError("nvidia-smi topology query failed: %s" % exc) from exc
+    return parse_nvidia_smi_topology(completed.stdout)
+
+
+def parse_nvidia_smi_topology(output: str) -> Dict[Tuple[int, int], int]:
+    lines = [line.split() for line in output.splitlines() if line.strip()]
+    if not lines:
+        return {}
+    header_index = next(
+        (index for index, fields in enumerate(lines) if fields and fields[0].startswith("GPU")),
+        None,
+    )
+    if header_index is None:
+        return {}
+    headers = [field for field in lines[header_index] if field.startswith("GPU")]
+    scores: Dict[Tuple[int, int], int] = {}
+    for fields in lines[header_index + 1:]:
+        if not fields or not fields[0].startswith("GPU"):
+            continue
+        try:
+            source = int(fields[0][3:])
+        except ValueError:
+            continue
+        for target_header, link in zip(headers, fields[1:]):
+            try:
+                target = int(target_header[3:])
+            except ValueError:
+                continue
+            if source == target:
+                continue
+            scores[(source, target)] = _topology_link_score(link)
+    return scores
+
+
+def _topology_link_score(link: str) -> int:
+    if link.startswith("NV"):
+        suffix = link[2:]
+        return 100 + (int(suffix) if suffix.isdigit() else 1)
+    return {"PIX": 60, "PXB": 50, "PHB": 40, "NODE": 30, "SYS": 20}.get(link, 0)
+
+
+def group_gpus_for_tensor_parallel(
+    gpus: Sequence[GPUDeviceInfo],
+    tensor_parallel_size: int,
+    link_scores: Dict[Tuple[int, int], int] | None = None,
+) -> List[List[GPUDeviceInfo]]:
+    if tensor_parallel_size < 1 or len(gpus) % tensor_parallel_size:
+        raise ValueError("GPU count must be divisible by tensor parallel size")
+    remaining = sorted(gpus, key=lambda gpu: gpu.index)
+    if tensor_parallel_size == 1:
+        return [[gpu] for gpu in remaining]
+    scores = link_scores or {}
+    groups: List[List[GPUDeviceInfo]] = []
+    while remaining:
+        candidates = list(itertools.combinations(remaining, tensor_parallel_size))
+        best = max(
+            candidates,
+            key=lambda group: (
+                sum(
+                    scores.get((left.index, right.index), scores.get((right.index, left.index), 0))
+                    for left, right in itertools.combinations(group, 2)
+                ),
+                sum(gpu.memory_free_mib for gpu in group),
+                tuple(-gpu.index for gpu in group),
+            ),
+        )
+        groups.append(sorted(best, key=lambda gpu: gpu.index))
+        chosen = {gpu.index for gpu in best}
+        remaining = [gpu for gpu in remaining if gpu.index not in chosen]
+    return groups
 
 
 def select_best_gpus(gpus: Sequence[GPUDeviceInfo], count: int) -> List[GPUDeviceInfo]:

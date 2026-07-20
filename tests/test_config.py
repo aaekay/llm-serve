@@ -332,3 +332,43 @@ def test_settings_loads_ollama_retry_controls(tmp_path):
     assert settings.ollama_batch_timeout_retry_multiplier == 4
     assert settings.ollama_batch_retry_output_tokens_multiplier == 1.5
     assert settings.ollama_batch_retry_max_output_tokens == 4096
+
+
+def test_settings_load_vllm_autotune_configuration(tmp_path):
+    settings = Settings.load(
+        base_dir=tmp_path,
+        environ={
+            "INFERENCE_BACKEND": "vllm",
+            "DEFAULT_MODEL_ID": "google/gemma-4-12B-it",
+            "MODEL_ALLOWLIST": "google/gemma-4-12B-it",
+            "REASONING_MODEL_ALLOWLIST": "",
+            "VLLM_GPU_MODE": "auto",
+            "VLLM_GPU_COUNT": "4",
+            "VLLM_AUTOTUNE_ON_MISS": "true",
+            "VLLM_AUTOTUNE_SLO_MULTIPLIER": "2.0",
+            "VLLM_AUTOTUNE_MAX_CONCURRENCY": "64",
+            "VLLM_AUTOTUNE_WORKLOAD_FILE": "workload.json",
+            "VLLM_AUTOTUNE_REPETITIONS": "2",
+            "VLLM_AUTOTUNE_REQUESTS_PER_LEVEL": "20",
+        },
+    )
+
+    assert settings.vllm_gpu_mode == "auto"
+    assert settings.vllm_gpu_count == 4
+    assert settings.vllm_autotune_on_miss is True
+    assert settings.vllm_autotune_workload_file == (tmp_path / "workload.json").resolve()
+    assert settings.vllm_autotune_repetitions == 2
+
+
+def test_settings_reject_invalid_vllm_gpu_mode(tmp_path):
+    with pytest.raises(ValueError, match="VLLM_GPU_MODE"):
+        Settings.load(
+            base_dir=tmp_path,
+            environ={
+                "INFERENCE_BACKEND": "vllm",
+                "DEFAULT_MODEL_ID": "model",
+                "MODEL_ALLOWLIST": "model",
+                "REASONING_MODEL_ALLOWLIST": "",
+                "VLLM_GPU_MODE": "fastest",
+            },
+        )

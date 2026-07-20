@@ -95,12 +95,19 @@ class Settings:
     vllm_max_num_batched_tokens: int
     vllm_swap_space_gb: Optional[float]
     startup_concurrency_test_max_level: int
+    vllm_gpu_mode: str
     vllm_gpu_auto_select: bool
     cuda_visible_devices: Optional[str]
     vllm_gpu_count: int
     vllm_gpu_memory_utilization: float
     vllm_gpu_memory_utilization_min: float
     vllm_gpu_memory_reserve_fraction: float
+    vllm_autotune_on_miss: bool
+    vllm_autotune_slo_multiplier: float
+    vllm_autotune_max_concurrency: int
+    vllm_autotune_workload_file: Optional[Path]
+    vllm_autotune_repetitions: int
+    vllm_autotune_requests_per_level: int
     ollama_base_url: str
     ollama_request_timeout_seconds: float
     ollama_request_timeout_retry_enabled: bool
@@ -233,6 +240,7 @@ class Settings:
             startup_concurrency_test_max_level=int(
                 env_source.get("STARTUP_CONCURRENCY_TEST_MAX_LEVEL", "32")
             ),
+            vllm_gpu_mode=env_source.get("VLLM_GPU_MODE", "manual").strip().lower(),
             vllm_gpu_auto_select=_parse_bool(
                 env_source.get("VLLM_GPU_AUTO_SELECT", "true"),
                 "VLLM_GPU_AUTO_SELECT",
@@ -245,6 +253,27 @@ class Settings:
             ),
             vllm_gpu_memory_reserve_fraction=float(
                 env_source.get("VLLM_GPU_MEMORY_RESERVE_FRACTION", "0.05")
+            ),
+            vllm_autotune_on_miss=_parse_bool(
+                env_source.get("VLLM_AUTOTUNE_ON_MISS", "true"),
+                "VLLM_AUTOTUNE_ON_MISS",
+            ),
+            vllm_autotune_slo_multiplier=float(
+                env_source.get("VLLM_AUTOTUNE_SLO_MULTIPLIER", "2.0")
+            ),
+            vllm_autotune_max_concurrency=int(
+                env_source.get("VLLM_AUTOTUNE_MAX_CONCURRENCY", "64")
+            ),
+            vllm_autotune_workload_file=(
+                (root / env_source["VLLM_AUTOTUNE_WORKLOAD_FILE"]).resolve()
+                if _optional_str(env_source.get("VLLM_AUTOTUNE_WORKLOAD_FILE")) is not None
+                else None
+            ),
+            vllm_autotune_repetitions=int(
+                env_source.get("VLLM_AUTOTUNE_REPETITIONS", "3")
+            ),
+            vllm_autotune_requests_per_level=int(
+                env_source.get("VLLM_AUTOTUNE_REQUESTS_PER_LEVEL", "24")
             ),
             ollama_base_url=env_source.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/"),
             ollama_request_timeout_seconds=float(
@@ -365,8 +394,18 @@ class Settings:
             raise ValueError("OLLAMA_BATCH_RETRY_MAX_OUTPUT_TOKENS must be at least 1")
         if self.inference_backend != "vllm":
             return
+        if self.vllm_gpu_mode not in {"manual", "auto"}:
+            raise ValueError("VLLM_GPU_MODE must be 'manual' or 'auto'")
         if self.vllm_gpu_count < 1:
             raise ValueError("VLLM_GPU_COUNT must be at least 1")
+        if self.vllm_autotune_slo_multiplier < 1:
+            raise ValueError("VLLM_AUTOTUNE_SLO_MULTIPLIER must be at least 1")
+        if self.vllm_autotune_max_concurrency < 1:
+            raise ValueError("VLLM_AUTOTUNE_MAX_CONCURRENCY must be at least 1")
+        if self.vllm_autotune_repetitions < 1:
+            raise ValueError("VLLM_AUTOTUNE_REPETITIONS must be at least 1")
+        if self.vllm_autotune_requests_per_level < 1:
+            raise ValueError("VLLM_AUTOTUNE_REQUESTS_PER_LEVEL must be at least 1")
         if self.vllm_max_model_len is not None and self.vllm_max_model_len < 1:
             raise ValueError("VLLM_MAX_MODEL_LEN must be at least 1 when set")
         if self.vllm_gdn_prefill_backend not in {None, "triton", "flashinfer"}:

@@ -84,6 +84,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             "switch_in_progress": snapshot["switch_in_progress"],
             "switch_target_model": snapshot["switch_target_model"],
             "startup_self_test": snapshot["startup_self_test"],
+            "throughput_tuning": snapshot["throughput_tuning"],
         }
 
     @app.get("/v1/models")
