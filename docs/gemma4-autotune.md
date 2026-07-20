@@ -2,6 +2,14 @@
 
 Use the vLLM checkpoint `google/gemma-4-12B-it`; the Ollama-style tag `gemma4:12b` does not give this service control over GPU topology.
 
+Gemma 4 12B Unified uses the project's supported vLLM 0.23.x runtime line for the native optimized implementation. If logs resolve `TransformersMultiModalForCausalLM` and report a Transformers fallback, upgrade the runtime before tuning:
+
+```bash
+uv sync --extra runtime --upgrade-package vllm
+```
+
+Set `HF_TOKEN` before the first run to avoid unauthenticated Hub rate limits while the model files are downloaded.
+
 For four 24 GB NVIDIA GPUs and text-only BF16 serving, start with:
 
 ```dotenv
@@ -31,6 +39,8 @@ uv run --extra runtime llm-serve tune
 Use `--force` to ignore an existing matching profile. Normal server startup also tunes when the profile is missing or stale and `VLLM_AUTOTUNE_ON_MISS=true`; readiness remains blocked while candidates are loading and benchmarking.
 
 Auto mode inspects the selected GPUs and their interconnects, rejects incompatible or memory-infeasible BF16 tensor-parallel widths, and benchmarks each remaining topology. On four 24 GB cards this normally compares two TP=2 replicas with one TP=4 replica. The result with the highest aggregate token throughput is selected only if every workload bucket remains within the configured p95 latency multiplier.
+
+For a TP=2/two-replica candidate, replicas start sequentially to avoid simultaneous model-download and compilation spikes. Seeing only two GPUs active during the first replica's startup is expected; all four become active before that candidate is benchmarked.
 
 The default workload is:
 

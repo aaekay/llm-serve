@@ -3,6 +3,9 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
+from llm_serve.errors import NotReadyError
 from llm_serve.runtime import autotune
 from llm_serve.runtime.autotune import AutoTunedVLLMBackend
 from llm_serve.runtime.gpu_selection import GPUDeviceInfo
@@ -46,6 +49,13 @@ def _gpu(index: int) -> GPUDeviceInfo:
     return GPUDeviceInfo(index, "GPU-%s" % index, "RTX", 24576, 512, 24064)
 
 
+def test_gemma4_unified_rejects_vllm_without_native_support(monkeypatch):
+    monkeypatch.setattr(autotune.importlib.metadata, "version", lambda package: "0.19.0")
+
+    with pytest.raises(NotReadyError, match="vLLM>=0.23.0"):
+        autotune._validate_vllm_version("google/gemma-4-12B-it")
+
+
 def test_auto_backend_reuses_matching_profile_without_retuning(tmp_path, monkeypatch):
     settings = make_settings(
         tmp_path,
@@ -58,6 +68,7 @@ def test_auto_backend_reuses_matching_profile_without_retuning(tmp_path, monkeyp
     )
     gpus = [_gpu(index) for index in range(4)]
     workload = load_workload(None)
+    monkeypatch.setattr(autotune.importlib.metadata, "version", lambda package: "0.23.0")
     fingerprint = build_profile_fingerprint(
         settings,
         settings.effective_default_model_id,

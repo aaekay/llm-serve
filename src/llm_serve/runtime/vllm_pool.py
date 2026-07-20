@@ -142,7 +142,6 @@ class VLLMWorker:
                 "HF_HOME": str(self.settings.huggingface_home),
                 "HUGGINGFACE_HUB_CACHE": str(self.settings.huggingface_hub_cache),
                 "TRANSFORMERS_CACHE": str(self.settings.transformers_cache),
-                "VLLM_USE_V1": "1" if self.optimized_engine else ("1" if self.settings.vllm_use_v1 else "0"),
             }
         )
         self.settings.model_cache_dir.mkdir(parents=True, exist_ok=True)
@@ -299,8 +298,22 @@ class VLLMPoolBackend(ModelBackend):
 
     async def start(self) -> None:
         try:
-            for worker in self.workers:
+            for position, worker in enumerate(self.workers, start=1):
+                logger.info(
+                    "Starting vLLM replica %s/%s for %s on host GPUs %s (tensor_parallel_size=%s)",
+                    position,
+                    len(self.workers),
+                    self.model_id,
+                    worker.gpu_indices,
+                    self.topology.tensor_parallel_size,
+                )
                 await worker.start()
+                logger.info(
+                    "vLLM replica %s/%s is healthy; %s replica(s) remain to start",
+                    position,
+                    len(self.workers),
+                    len(self.workers) - position,
+                )
         except BaseException:
             await asyncio.gather(*(worker.stop() for worker in self.workers), return_exceptions=True)
             raise

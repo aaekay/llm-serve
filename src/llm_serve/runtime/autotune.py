@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.metadata
 import logging
+import re
 import time
 from dataclasses import dataclass
 from dataclasses import replace
@@ -254,6 +256,7 @@ class AutoTunedVLLMBackend(ModelBackend):
 
     async def start(self) -> None:
         self._status = "inspecting"
+        _validate_vllm_version(self.model_id)
         inspected = self.gpu_query_fn()
         try:
             selected = _select_gpu_budget(inspected, self.settings)
@@ -370,6 +373,25 @@ def _load_model_config(model_id: str, settings: Settings) -> tuple[Any, Optional
         raise NotReadyError("Could not load model configuration for autotuning: %s" % exc) from exc
     revision = getattr(config, "_commit_hash", None)
     return config, revision if isinstance(revision, str) else None
+
+
+def _validate_vllm_version(model_id: str) -> None:
+    if "gemma-4-12b" not in model_id.lower():
+        return
+    try:
+        raw_version = importlib.metadata.version("vllm")
+    except importlib.metadata.PackageNotFoundError as exc:
+        raise NotReadyError("vLLM is not installed; install the runtime dependency set") from exc
+    match = re.match(r"(\d+)\.(\d+)\.(\d+)", raw_version)
+    if match is None:
+        raise NotReadyError("Could not determine whether vLLM %s supports Gemma 4 Unified" % raw_version)
+    version = tuple(int(part) for part in match.groups())
+    if version < (0, 23, 0):
+        raise NotReadyError(
+            "Gemma 4 12B Unified requires vLLM>=0.23.0 for its native optimized implementation; "
+            "found vLLM %s. Upgrade with 'uv sync --extra runtime --upgrade-package vllm'."
+            % raw_version
+        )
 
 
 def _select_gpu_budget(inspected: Sequence[GPUDeviceInfo], settings: Settings) -> List[GPUDeviceInfo]:
