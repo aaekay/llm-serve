@@ -110,7 +110,6 @@ class VLLMWorker:
             str(self.settings.vllm_max_num_seqs),
             "--max-num-batched-tokens",
             str(self.settings.vllm_max_num_batched_tokens),
-            "--disable-log-requests",
         ]
         if self.settings.vllm_max_model_len is not None:
             command.extend(["--max-model-len", str(self.settings.vllm_max_model_len)])

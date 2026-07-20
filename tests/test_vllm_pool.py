@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 
 from llm_serve.runtime.throughput import WorkerTopology
-from llm_serve.runtime.vllm_pool import VLLMPoolBackend
+from llm_serve.runtime import vllm_pool
+from llm_serve.runtime.vllm_pool import VLLMPoolBackend, VLLMWorker
 from llm_serve.types import InferenceRequest
 
 from .conftest import make_settings
@@ -39,6 +40,23 @@ class FakeWorker:
         self.calls.append((path, payload))
         yield {"choices": [{"text": "hello "}]}
         yield {"choices": [{"text": "world"}]}
+
+
+def test_worker_command_avoids_removed_disable_log_requests_flag(tmp_path, monkeypatch):
+    settings = make_settings(tmp_path, INFERENCE_BACKEND="vllm")
+    monkeypatch.setattr(vllm_pool, "_vllm_executable", lambda: "/opt/bin/vllm")
+    monkeypatch.setattr(vllm_pool, "_unused_loopback_port", lambda: 18000)
+    worker = VLLMWorker(0, "model", [0, 1], 2, settings, optimized_engine=True)
+
+    async def scenario():
+        command = worker.command()
+        await worker.stop()
+        return command
+
+    command = asyncio.run(scenario())
+
+    assert command[:3] == ["/opt/bin/vllm", "serve", "model"]
+    assert "--disable-log-requests" not in command
 
 
 def test_pool_routes_to_worker_with_least_outstanding_token_load(tmp_path):
