@@ -33,7 +33,6 @@ pip-wheel-metadata/
 
 # Runtime data and logs
 data/runtime/
-data/models/
 models/
 *.log
 

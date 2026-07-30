@@ -362,6 +362,12 @@ class Settings:
         return "DEFAULT_MODEL_ID"
 
     def validate(self) -> None:
+        self._validate_common()
+        self._validate_ollama()
+        if self.inference_backend == "vllm":
+            self._validate_vllm()
+
+    def _validate_common(self) -> None:
         if not self.model_allowlist:
             raise ValueError("MODEL_ALLOWLIST must not be empty")
         if self.vllm_default_model_id is not None:
@@ -400,6 +406,8 @@ class Settings:
             raise ValueError("STORAGE_RETENTION_HOURS must be non-negative (0 disables cleanup)")
         if self.inference_backend not in {"mock", "vllm", "ollama"}:
             raise ValueError("INFERENCE_BACKEND must be 'mock', 'vllm', or 'ollama'")
+
+    def _validate_ollama(self) -> None:
         if not self.ollama_base_url:
             raise ValueError("OLLAMA_BASE_URL must not be empty")
         if self.ollama_request_timeout_seconds <= 0:
@@ -412,8 +420,8 @@ class Settings:
             raise ValueError("OLLAMA_BATCH_RETRY_OUTPUT_TOKENS_MULTIPLIER must be at least 1")
         if self.ollama_batch_retry_max_output_tokens < 1:
             raise ValueError("OLLAMA_BATCH_RETRY_MAX_OUTPUT_TOKENS must be at least 1")
-        if self.inference_backend != "vllm":
-            return
+
+    def _validate_vllm(self) -> None:
         if self.vllm_gpu_mode not in {"manual", "auto", "fixed"}:
             raise ValueError("VLLM_GPU_MODE must be 'manual', 'auto', or 'fixed'")
         if self.vllm_gpu_count < 1:

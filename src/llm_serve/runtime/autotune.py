@@ -53,6 +53,13 @@ class _RequestTiming:
     total_tokens: int
 
 
+@dataclass(frozen=True)
+class _GPUPlan:
+    selected: List[GPUDeviceInfo]
+    settings: Settings
+    link_scores: Dict[tuple[int, int], int]
+
+
 class ThroughputTuner:
     def __init__(
         self,
@@ -260,29 +267,15 @@ class AutoTunedVLLMBackend(ModelBackend):
     async def start(self) -> None:
         self._status = "inspecting"
         _validate_vllm_version(self.model_id)
-        inspected = self.gpu_query_fn()
-        try:
-            selected = _select_gpu_budget(inspected, self.settings)
-        except ValueError as exc:
-            raise NotReadyError("Could not select autotune GPU budget: %s" % exc) from exc
-        try:
-            effective_utilization, _ = derive_gpu_memory_utilization(
-                selected,
-                self.settings.vllm_gpu_memory_utilization,
-                self.settings.vllm_gpu_memory_reserve_fraction,
-                self.settings.vllm_gpu_memory_utilization_min,
-            )
-        except ValueError as exc:
-            raise NotReadyError("Selected autotune GPUs do not have enough free memory: %s" % exc) from exc
-        runtime_settings = replace(
+        gpu_plan = _prepare_gpu_plan(
+            "autotune",
             self.settings,
-            vllm_gpu_memory_utilization=effective_utilization,
+            self.gpu_query_fn,
+            self.topology_query_fn,
         )
-        try:
-            link_scores = self.topology_query_fn()
-        except Exception as exc:
-            logger.warning("GPU topology inspection failed; using index grouping: %s", exc)
-            link_scores = {}
+        selected = gpu_plan.selected
+        runtime_settings = gpu_plan.settings
+        link_scores = gpu_plan.link_scores
         model_config, revision = _load_model_config(self.model_id, self.settings)
         workload = load_workload(self.settings.vllm_autotune_workload_file)
         fingerprint = build_profile_fingerprint(
@@ -359,6 +352,50 @@ class AutoTunedVLLMBackend(ModelBackend):
         return self._pool
 
 
+class ManualVLLMBackend(AutoTunedVLLMBackend):
+    """Run manual tensor parallelism through one supervised vLLM worker."""
+
+    @property
+    def tuning_snapshot(self) -> Dict[str, Any]:
+        snapshot = super().tuning_snapshot
+        snapshot["mode"] = "manual"
+        return snapshot
+
+    async def start(self) -> None:
+        self._status = "inspecting"
+        _validate_vllm_version(self.model_id)
+        gpu_plan = _prepare_gpu_plan(
+            "manual topology",
+            self.settings,
+            self.gpu_query_fn,
+            derive_memory=self.settings.vllm_gpu_auto_select,
+            inspect_topology=False,
+        )
+        topology = WorkerTopology(
+            tensor_parallel_size=self.settings.vllm_gpu_count,
+            gpu_groups=[[gpu.index for gpu in gpu_plan.selected]],
+        )
+        self._status = "starting"
+        self._pool = self.pool_factory(
+            self.model_id,
+            gpu_plan.settings,
+            topology,
+            optimized_engine=False,
+        )
+        try:
+            await self._pool.start()
+        except BaseException:
+            await self._pool.shutdown()
+            self._pool = None
+            raise
+        self._status = "ready"
+
+    def _require_pool(self) -> VLLMPoolBackend:
+        if self._pool is None:
+            raise NotReadyError("The manual vLLM worker pool is not ready")
+        return self._pool
+
+
 class FixedTopologyVLLMBackend(AutoTunedVLLMBackend):
     """Run an explicitly configured tensor-parallel/replica topology without tuning."""
 
@@ -371,22 +408,12 @@ class FixedTopologyVLLMBackend(AutoTunedVLLMBackend):
     async def start(self) -> None:
         self._status = "inspecting"
         _validate_vllm_version(self.model_id)
-        inspected = self.gpu_query_fn()
-        try:
-            selected = _select_gpu_budget(inspected, self.settings)
-        except ValueError as exc:
-            raise NotReadyError("Could not select fixed topology GPU budget: %s" % exc) from exc
-        try:
-            effective_utilization, _ = derive_gpu_memory_utilization(
-                selected,
-                self.settings.vllm_gpu_memory_utilization,
-                self.settings.vllm_gpu_memory_reserve_fraction,
-                self.settings.vllm_gpu_memory_utilization_min,
-            )
-        except ValueError as exc:
-            raise NotReadyError(
-                "Selected fixed topology GPUs do not have enough free memory: %s" % exc
-            ) from exc
+        gpu_plan = _prepare_gpu_plan(
+            "fixed topology",
+            self.settings,
+            self.gpu_query_fn,
+            self.topology_query_fn,
+        )
 
         tensor_parallel_size = self.settings.vllm_tensor_parallel_size
         replica_count = self.settings.vllm_replica_count
@@ -395,15 +422,10 @@ class FixedTopologyVLLMBackend(AutoTunedVLLMBackend):
                 "Fixed topology requires VLLM_TENSOR_PARALLEL_SIZE and VLLM_REPLICA_COUNT"
             )
         try:
-            link_scores = self.topology_query_fn()
-        except Exception as exc:
-            logger.warning("GPU topology inspection failed; using index grouping: %s", exc)
-            link_scores = {}
-        try:
             groups = group_gpus_for_tensor_parallel(
-                selected,
+                gpu_plan.selected,
                 tensor_parallel_size,
-                link_scores,
+                gpu_plan.link_scores,
             )
         except ValueError as exc:
             raise NotReadyError("Invalid fixed vLLM topology: %s" % exc) from exc
@@ -413,10 +435,6 @@ class FixedTopologyVLLMBackend(AutoTunedVLLMBackend):
                 % (len(groups), replica_count)
             )
 
-        runtime_settings = replace(
-            self.settings,
-            vllm_gpu_memory_utilization=effective_utilization,
-        )
         topology = WorkerTopology(
             tensor_parallel_size=tensor_parallel_size,
             gpu_groups=[[gpu.index for gpu in group] for group in groups],
@@ -424,7 +442,7 @@ class FixedTopologyVLLMBackend(AutoTunedVLLMBackend):
         self._status = "starting"
         pool = self.pool_factory(
             self.model_id,
-            runtime_settings,
+            gpu_plan.settings,
             topology,
             optimized_engine=True,
         )
@@ -439,7 +457,7 @@ class FixedTopologyVLLMBackend(AutoTunedVLLMBackend):
             )
             pool = self.pool_factory(
                 self.model_id,
-                runtime_settings,
+                gpu_plan.settings,
                 topology,
                 optimized_engine=False,
             )
@@ -468,12 +486,53 @@ def _load_model_config(model_id: str, settings: Settings) -> tuple[Any, Optional
         config = AutoConfig.from_pretrained(
             model_id,
             trust_remote_code=settings.vllm_trust_remote_code,
-            cache_dir=str(settings.model_cache_dir),
+            cache_dir=str(settings.huggingface_hub_cache),
         )
     except Exception as exc:
         raise NotReadyError("Could not load model configuration for autotuning: %s" % exc) from exc
     revision = getattr(config, "_commit_hash", None)
     return config, revision if isinstance(revision, str) else None
+
+
+def _prepare_gpu_plan(
+    label: str,
+    settings: Settings,
+    gpu_query_fn: Callable[[], List[GPUDeviceInfo]],
+    topology_query_fn: Optional[Callable[[], Dict[tuple[int, int], int]]] = None,
+    *,
+    derive_memory: bool = True,
+    inspect_topology: bool = True,
+) -> _GPUPlan:
+    try:
+        selected = _select_gpu_budget(gpu_query_fn(), settings)
+    except ValueError as exc:
+        raise NotReadyError("Could not select %s GPU budget: %s" % (label, exc)) from exc
+
+    effective_utilization = settings.vllm_gpu_memory_utilization
+    if derive_memory:
+        try:
+            effective_utilization, _ = derive_gpu_memory_utilization(
+                selected,
+                settings.vllm_gpu_memory_utilization,
+                settings.vllm_gpu_memory_reserve_fraction,
+                settings.vllm_gpu_memory_utilization_min,
+            )
+        except ValueError as exc:
+            raise NotReadyError(
+                "Selected %s GPUs do not have enough free memory: %s" % (label, exc)
+            ) from exc
+
+    link_scores: Dict[tuple[int, int], int] = {}
+    if inspect_topology and topology_query_fn is not None:
+        try:
+            link_scores = topology_query_fn()
+        except Exception as exc:
+            logger.warning("GPU topology inspection failed; using index grouping: %s", exc)
+    return _GPUPlan(
+        selected=selected,
+        settings=replace(settings, vllm_gpu_memory_utilization=effective_utilization),
+        link_scores=link_scores,
+    )
 
 
 def _validate_vllm_version(model_id: str) -> None:

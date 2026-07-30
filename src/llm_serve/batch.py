@@ -11,10 +11,9 @@ from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional, Protocol, TextIO
 
 from llm_serve.errors import BadRequestError, UpstreamTimeoutError
-from llm_serve.prompting import render_messages_to_prompt
+from llm_serve.request_builders import build_openai_chat_request
 from llm_serve.schemas import BatchCreateRequest, BatchInputLine, BatchRecord, OpenAIChatRequest
 from llm_serve.storage import StorageManager, utc_timestamp
-from llm_serve.tokenization import estimate_messages_tokens
 from llm_serve.types import InferenceRequest
 
 from .runtime.manager import RuntimeManager
@@ -369,30 +368,14 @@ class BatchManager:
 
         openai_request = OpenAIChatRequest.model_validate(parsed.body)
         model_id = self.runtime.resolve_model(openai_request.model, openai_request.reasoning_effort)
-        estimated_tokens = estimate_messages_tokens([message.model_dump() for message in openai_request.messages])
-        if estimated_tokens > self.runtime.settings.max_input_tokens:
-            raise BadRequestError(
-                "Prompt too long: estimated %s tokens, max is %s"
-                % (estimated_tokens, self.runtime.settings.max_input_tokens)
-            )
         return _PreparedBatchItem(
             custom_id=parsed.custom_id,
             include_reasoning=openai_request.include_reasoning,
-            inference_request=InferenceRequest(
-                model_id=model_id,
-                prompt=render_messages_to_prompt(openai_request.messages),
-                max_output_tokens=min(
-                    openai_request.resolved_max_tokens(self.runtime.settings.max_output_tokens),
-                    self.runtime.settings.max_output_tokens,
-                ),
-                temperature=openai_request.temperature
-                if openai_request.temperature is not None
-                else self.runtime.settings.default_temperature,
-                top_p=openai_request.top_p if openai_request.top_p is not None else self.runtime.settings.default_top_p,
+            inference_request=build_openai_chat_request(
+                openai_request,
+                model_id,
+                self.runtime.settings,
                 stream=False,
-                reasoning_effort=openai_request.reasoning_effort,
-                include_reasoning=openai_request.include_reasoning,
-                messages=[message.model_dump() for message in openai_request.messages],
                 timeout_retry_enabled=timeout_retry_enabled,
             ),
         )

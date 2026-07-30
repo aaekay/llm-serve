@@ -2,10 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import statistics
-import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional
 
 from llm_serve.config import Settings
@@ -15,13 +12,13 @@ from llm_serve.errors import (
     GatewayTimeoutError,
     TooManyRequestsError,
 )
-from llm_serve.types import InferenceRequest, InferenceResult, LoadStatus, StartupSelfTestResult
+from llm_serve.types import InferenceRequest, InferenceResult, LoadStatus
 
 from .base import ModelBackend
-from .autotune import AutoTunedVLLMBackend, FixedTopologyVLLMBackend
+from .autotune import AutoTunedVLLMBackend, FixedTopologyVLLMBackend, ManualVLLMBackend
+from .diagnostics import StartupDiagnostics
 from .mock import MockModelBackend
 from .ollama_backend import OllamaAPIClient, OllamaModelBackend
-from .vllm_backend import VLLMModelBackend
 
 
 BackendFactory = Callable[[str], Awaitable[ModelBackend]]
@@ -49,8 +46,6 @@ class RuntimeManager:
         self._switch_task: Optional[asyncio.Task[None]] = None
         self._switch_target_model: Optional[str] = None
         self._last_switch_error: Optional[str] = None
-        self._startup_self_test = StartupSelfTestResult(status="pending")
-        self._startup_self_test_task: Optional[asyncio.Task[None]] = None
         self._foreground_pending = 0
         self._batch_pending = 0
         self._pending_lock = asyncio.Lock()
@@ -59,10 +54,15 @@ class RuntimeManager:
         self._batch_semaphore = asyncio.Semaphore(settings.batch_max_parallel)
         self._total_capacity = settings.prompt_max_parallel + settings.batch_max_parallel
         self._total_semaphore = asyncio.Semaphore(self._total_capacity)
+        self._diagnostics = StartupDiagnostics(
+            settings,
+            self._generate_with_active_backend,
+            self.run_foreground,
+        )
 
     async def startup(self) -> None:
         if not self.settings.startup_load_default_model:
-            self._startup_self_test = StartupSelfTestResult(status="skipped")
+            self._diagnostics.skip()
             logger.info("Startup default-model load is disabled; skipping startup self-test.")
             return
 
@@ -70,26 +70,10 @@ class RuntimeManager:
         logger.info("Loading default model '%s' during startup.", default_model_id)
         await self.ensure_loaded(default_model_id)
         logger.info("Default model '%s' is ready.", default_model_id)
-        await self._start_startup_self_test()
-
-        if self.settings.startup_concurrency_test and not (
-            self.settings.inference_backend == "vllm" and self.settings.vllm_gpu_mode == "auto"
-        ):
-            if self._startup_self_test_task and not self._startup_self_test_task.done():
-                logger.info("Waiting for startup self-test to finish before concurrency test.")
-                try:
-                    await self._startup_self_test_task
-                except Exception:
-                    pass
-            await self._run_startup_concurrency_test()
+        await self._diagnostics.start()
 
     async def shutdown(self) -> None:
-        if self._startup_self_test_task and not self._startup_self_test_task.done():
-            self._startup_self_test_task.cancel()
-            try:
-                await self._startup_self_test_task
-            except asyncio.CancelledError:
-                pass
+        await self._diagnostics.shutdown()
         if self._switch_task and not self._switch_task.done():
             self._switch_task.cancel()
             try:
@@ -287,7 +271,7 @@ class RuntimeManager:
             "switch_in_progress": self.switch_in_progress,
             "switch_target_model": self._switch_target_model,
             "last_switch_error": self._last_switch_error,
-            "startup_self_test": self._serialize_startup_self_test(),
+            "startup_self_test": self._diagnostics.snapshot(),
             "throughput_tuning": self._throughput_tuning_snapshot(),
         }
 
@@ -426,11 +410,7 @@ class RuntimeManager:
             return AutoTunedVLLMBackend(model_id, self.settings)
         if self.settings.vllm_gpu_mode == "fixed":
             return FixedTopologyVLLMBackend(model_id, self.settings)
-        return VLLMModelBackend(
-            model_id,
-            self.settings,
-            enable_adaptive_gpu_selection=self._active_backend is None,
-        )
+        return ManualVLLMBackend(model_id, self.settings)
 
     def _apply_backend_capacity(self, backend: ModelBackend) -> None:
         configured = getattr(backend, "effective_foreground_concurrency", None)
@@ -474,222 +454,6 @@ class RuntimeManager:
                 if self._active_usages == 0:
                     self._usage_idle.set()
 
-    async def _run_startup_self_test(self) -> None:
-        prompt = self.settings.startup_self_test_prompt.strip()
-        default_model_id = self.settings.effective_default_model_id
-        if not self.settings.startup_self_test_enabled:
-            self._startup_self_test = StartupSelfTestResult(status="disabled", prompt=prompt or None)
-            return
-        if not prompt:
-            self._startup_self_test = StartupSelfTestResult(status="skipped")
-            return
-
-        started_at = datetime.now(timezone.utc)
-        self._startup_self_test = StartupSelfTestResult(
-            status="running",
-            prompt=prompt,
-            model_id=default_model_id,
-            started_at=started_at.isoformat(),
-        )
-        request = InferenceRequest(
-            model_id=default_model_id,
-            prompt=prompt,
-            max_output_tokens=self.settings.startup_self_test_max_output_tokens,
-            temperature=self.settings.default_temperature,
-            top_p=self.settings.default_top_p,
-            stream=False,
-        )
-        logger.info(
-            "Startup self-test started for model '%s' with max_output_tokens=%s and prompt=%r",
-            default_model_id,
-            self.settings.startup_self_test_max_output_tokens,
-            _preview_text(prompt),
-        )
-        started = time.perf_counter()
-        try:
-            result = await self._generate_with_active_backend(request)
-        except Exception as exc:
-            completed_at = datetime.now(timezone.utc)
-            self._startup_self_test = StartupSelfTestResult(
-                status="failed",
-                prompt=prompt,
-                model_id=default_model_id,
-                started_at=started_at.isoformat(),
-                completed_at=completed_at.isoformat(),
-                error=str(exc),
-            )
-            logger.exception("Startup self-test failed for model '%s'", default_model_id)
-            raise
-
-        latency_seconds = max(time.perf_counter() - started, 1e-9)
-        completed_at = datetime.now(timezone.utc)
-        tokens_per_second = result.completion_tokens / latency_seconds
-        self._startup_self_test = StartupSelfTestResult(
-            status="passed",
-            prompt=prompt,
-            model_id=default_model_id,
-            started_at=started_at.isoformat(),
-            completed_at=completed_at.isoformat(),
-            latency_seconds=latency_seconds,
-            completion_tokens=result.completion_tokens,
-            tokens_per_second=tokens_per_second,
-        )
-        logger.info(
-            "Startup self-test passed for model '%s': completion_tokens=%s latency=%.3fs tokens_per_second=%.2f",
-            default_model_id,
-            result.completion_tokens,
-            latency_seconds,
-            tokens_per_second,
-        )
-        logger.info(
-            "Startup self-test output for model '%s':\n%s",
-            default_model_id,
-            result.text,
-        )
-
-    async def _start_startup_self_test(self) -> None:
-        prompt = self.settings.startup_self_test_prompt.strip()
-        default_model_id = self.settings.effective_default_model_id
-        if not self.settings.startup_self_test_enabled:
-            self._startup_self_test = StartupSelfTestResult(status="disabled", prompt=prompt or None)
-            logger.info("Startup self-test is disabled.")
-            return
-        if not prompt:
-            self._startup_self_test = StartupSelfTestResult(status="skipped")
-            logger.info("Startup self-test skipped because STARTUP_SELF_TEST_PROMPT is empty.")
-            return
-        if self.settings.startup_self_test_blocking:
-            logger.info(
-                "Startup self-test is running in blocking mode for model '%s'.",
-                default_model_id,
-            )
-            await self._run_startup_self_test()
-            return
-
-        self._startup_self_test = StartupSelfTestResult(
-            status="queued",
-            prompt=prompt,
-            model_id=default_model_id,
-        )
-        logger.info(
-            "Startup self-test queued for model '%s' with max_output_tokens=%s and prompt=%r",
-            default_model_id,
-            self.settings.startup_self_test_max_output_tokens,
-            _preview_text(prompt),
-        )
-        self._startup_self_test_task = asyncio.create_task(self._run_startup_self_test_background())
-        self._startup_self_test_task.add_done_callback(self._clear_startup_self_test_task)
-
-    async def _run_startup_self_test_background(self) -> None:
-        try:
-            await self._run_startup_self_test()
-        except asyncio.CancelledError:
-            if self._startup_self_test.status in {"queued", "running"}:
-                self._startup_self_test = StartupSelfTestResult(
-                    status="cancelled",
-                    prompt=self._startup_self_test.prompt,
-                    model_id=self._startup_self_test.model_id,
-                    started_at=self._startup_self_test.started_at,
-                )
-            raise
-        except Exception:
-            return
-
-    async def _run_startup_concurrency_test(self) -> None:
-        prompt = self.settings.startup_self_test_prompt.strip()
-        model_id = self.settings.effective_default_model_id
-        max_tokens = self.settings.startup_self_test_max_output_tokens
-        max_level = min(
-            self.settings.startup_concurrency_test_max_level,
-            self.settings.prompt_max_parallel,
-        )
-
-        if max_level < 2:
-            logger.info(
-                "Skipping startup concurrency test: effective max level %s is below minimum 2 "
-                "(STARTUP_CONCURRENCY_TEST_MAX_LEVEL=%s, PROMPT_MAX_PARALLEL=%s).",
-                max_level,
-                self.settings.startup_concurrency_test_max_level,
-                self.settings.prompt_max_parallel,
-            )
-            return
-
-        if not prompt:
-            logger.info("Skipping startup concurrency test: no self-test prompt configured.")
-            return
-
-        levels = [lvl for lvl in (2, 4, 8, 16, 24, 32) if lvl <= max_level]
-        if not levels or levels[-1] != max_level:
-            levels.append(max_level)
-        levels = sorted(set(levels))
-
-        logger.info("")
-        logger.info("=== Startup Concurrency Test (model: %s) ===", model_id)
-        logger.info(
-            "%-7s  %-9s  %-15s  %-20s  %-22s  %-22s",
-            "Level",
-            "Requests",
-            "Wall-clock (s)",
-            "Throughput (tok/s)",
-            "Per-req tok/s (median)",
-            "Per-req tok/s (p95)",
-        )
-        logger.info("-" * 100)
-
-        async def _timed_run(req: InferenceRequest):
-            req_start = time.perf_counter()
-            result = await self.run_foreground(req)
-            req_latency = max(time.perf_counter() - req_start, 1e-9)
-            return result, req_latency
-
-        for concurrency in levels:
-            requests = [
-                InferenceRequest(
-                    model_id=model_id,
-                    prompt=prompt,
-                    max_output_tokens=max_tokens,
-                    temperature=self.settings.default_temperature,
-                    top_p=self.settings.default_top_p,
-                    stream=False,
-                )
-                for _ in range(concurrency)
-            ]
-            started = time.perf_counter()
-            timed = await asyncio.gather(*[_timed_run(req) for req in requests])
-            elapsed = max(time.perf_counter() - started, 1e-9)
-
-            results = [item[0] for item in timed]
-            latencies = [item[1] for item in timed]
-            total_tokens = sum(r.completion_tokens for r in results)
-            throughput = total_tokens / elapsed
-
-            per_request_rates = [
-                (r.completion_tokens / lat) if lat > 0 else 0.0
-                for r, lat in zip(results, latencies)
-            ]
-            median_rate = statistics.median(per_request_rates) if per_request_rates else 0.0
-            if len(per_request_rates) >= 2:
-                sorted_rates = sorted(per_request_rates)
-                # Nearest-rank p95 (low estimate when n is small).
-                p95_index = max(0, int(round(0.95 * (len(sorted_rates) - 1))))
-                p95_rate = sorted_rates[p95_index]
-            else:
-                p95_rate = per_request_rates[0] if per_request_rates else 0.0
-
-            logger.info(
-                "%-7d  %-9d  %-15.2f  %-20.2f  %-22.2f  %-22.2f",
-                concurrency,
-                concurrency,
-                elapsed,
-                throughput,
-                median_rate,
-                p95_rate,
-            )
-
-        logger.info("-" * 100)
-        logger.info("=== Concurrency Test Complete ===")
-        logger.info("")
-
     async def _timeout_stream(self, stream: AsyncIterator[str], timeout: float) -> AsyncIterator[str]:
         ait = stream.__aiter__()
         while True:
@@ -710,33 +474,3 @@ class RuntimeManager:
                 coro,
                 timeout=self.settings.request_timeout_seconds,
             )
-
-    def _clear_startup_self_test_task(self, task: asyncio.Task[None]) -> None:
-        try:
-            task.result()
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            pass
-        finally:
-            if self._startup_self_test_task is task:
-                self._startup_self_test_task = None
-
-    def _serialize_startup_self_test(self) -> Dict[str, object]:
-        return {
-            "status": self._startup_self_test.status,
-            "prompt": self._startup_self_test.prompt,
-            "model_id": self._startup_self_test.model_id,
-            "started_at": self._startup_self_test.started_at,
-            "completed_at": self._startup_self_test.completed_at,
-            "latency_seconds": self._startup_self_test.latency_seconds,
-            "completion_tokens": self._startup_self_test.completion_tokens,
-            "tokens_per_second": self._startup_self_test.tokens_per_second,
-            "error": self._startup_self_test.error,
-        }
-
-
-def _preview_text(text: str, limit: int = 160) -> str:
-    if len(text) <= limit:
-        return text
-    return "%s..." % text[:limit - 3]

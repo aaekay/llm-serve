@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -59,6 +60,34 @@ def test_gemma4_unified_rejects_vllm_without_native_support(monkeypatch):
 
     with pytest.raises(NotReadyError, match="vLLM>=0.23.0"):
         autotune._validate_vllm_version("google/gemma-4-12B-it")
+
+
+def test_model_config_uses_shared_huggingface_hub_cache(tmp_path, monkeypatch):
+    captured = {}
+    transformers_module = ModuleType("transformers")
+
+    class FakeAutoConfig:
+        @staticmethod
+        def from_pretrained(model_id, trust_remote_code=False, cache_dir=None):
+            captured.update(
+                model_id=model_id,
+                trust_remote_code=trust_remote_code,
+                cache_dir=cache_dir,
+            )
+            return SimpleNamespace(_commit_hash="revision")
+
+    transformers_module.AutoConfig = FakeAutoConfig
+    monkeypatch.setitem(sys.modules, "transformers", transformers_module)
+    settings = make_settings(tmp_path, VLLM_TRUST_REMOTE_CODE="true")
+
+    _, revision = autotune._load_model_config("org/model", settings)
+
+    assert revision == "revision"
+    assert captured == {
+        "model_id": "org/model",
+        "trust_remote_code": True,
+        "cache_dir": str(settings.huggingface_hub_cache),
+    }
 
 
 def test_auto_backend_reuses_matching_profile_without_retuning(tmp_path, monkeypatch):

@@ -142,6 +142,8 @@ class VLLMWorker:
                 "HF_HOME": str(self.settings.huggingface_home),
                 "HUGGINGFACE_HUB_CACHE": str(self.settings.huggingface_hub_cache),
                 "TRANSFORMERS_CACHE": str(self.settings.transformers_cache),
+                "VLLM_USE_V1": "1" if self.settings.vllm_use_v1 else "0",
+                "VLLM_SKIP_GDN_WARMUP": "1",
             }
         )
         self.settings.model_cache_dir.mkdir(parents=True, exist_ok=True)
@@ -345,6 +347,7 @@ class VLLMPoolBackend(ModelBackend):
             yield chunk
 
     async def _generate(self, request: InferenceRequest, *, chat: bool) -> InferenceResult:
+        chat = chat or self._completion_uses_chat(request)
         async with self._worker_lease(request) as worker:
             path, payload = self._payload(request, chat=chat, stream=False)
             raw = await worker.request_json(path, payload)
@@ -368,6 +371,7 @@ class VLLMPoolBackend(ModelBackend):
         )
 
     async def _stream(self, request: InferenceRequest, *, chat: bool) -> AsyncIterator[str]:
+        chat = chat or self._completion_uses_chat(request)
         stripper = ThinkingContentStripper()
         async with self._worker_lease(request) as worker:
             path, payload = self._payload(request, chat=chat, stream=True)
@@ -397,9 +401,18 @@ class VLLMPoolBackend(ModelBackend):
         }
         if chat:
             payload["messages"] = request.messages or [{"role": "user", "content": request.prompt}]
+            payload["chat_template_kwargs"] = {
+                "enable_thinking": self._thinking_enabled(request),
+            }
             return "/v1/chat/completions", payload
         payload["prompt"] = request.prompt
         return "/v1/completions", payload
+
+    def _thinking_enabled(self, request: InferenceRequest) -> bool:
+        return self._settings.enable_thinking and bool(request.reasoning_effort)
+
+    def _completion_uses_chat(self, request: InferenceRequest) -> bool:
+        return request.messages is None and self._thinking_enabled(request)
 
     @asynccontextmanager
     async def _worker_lease(self, request: InferenceRequest):

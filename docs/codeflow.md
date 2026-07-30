@@ -14,6 +14,7 @@
 - `INFERENCE_BACKEND=ollama` treats Ollama as an already-running upstream service and proxies inference, optional pulls, and model tags to `OLLAMA_BASE_URL`.
 - `INFERENCE_BACKEND=mock` exists only for tests and lightweight local verification.
 - Default-model precedence is backend-aware: `VLLM_DEFAULT_MODEL_ID` overrides `DEFAULT_MODEL_ID` in `vllm`, `OLLAMA_DEFAULT_MODEL_ID` overrides it in `ollama`, and `mock` uses `DEFAULT_MODEL_ID`.
+- Manual, fixed, and auto vLLM modes all use supervised `vllm serve` workers; the mode changes topology selection, not request or process lifecycle.
 - In `vllm` mode, chat requests should use model-native chat templates. For Qwen/Qwen3.5-27B, `reasoning_effort` enables thinking mode and non-stream reasoning may be surfaced in the response body, while streamed output remains answer-only.
 
 ## GPU Configuration
@@ -31,6 +32,7 @@
 - This cache is only used in `vllm` mode.
 - `MODEL_CACHE_DIR` defaults to the repo-local `models/`.
 - Before vLLM is initialized, the backend creates that directory and exports `HF_HOME`, `HUGGINGFACE_HUB_CACHE`, and `TRANSFORMERS_CACHE` under it.
+- Direct Transformers tokenizer/config loads and vLLM workers share `models/hub/`; no model-loading path reads the legacy `data/models/` directory.
 - As a result, model weights and Hugging Face cache artifacts stay inside the repo-local cache tree unless the config is changed.
 
 ## Startup Self-Test
@@ -65,7 +67,7 @@ Relevant files:
 
 - [`src/llm_serve/app.py`](/Users/aaekay/Documents/projects/llm-serve/src/llm_serve/app.py)
 - [`src/llm_serve/runtime/manager.py`](/Users/aaekay/Documents/projects/llm-serve/src/llm_serve/runtime/manager.py)
-- [`src/llm_serve/runtime/vllm_backend.py`](/Users/aaekay/Documents/projects/llm-serve/src/llm_serve/runtime/vllm_backend.py)
+- [`src/llm_serve/runtime/vllm_pool.py`](../src/llm_serve/runtime/vllm_pool.py)
 - [`src/llm_serve/runtime/ollama_backend.py`](/Users/aaekay/Documents/projects/llm-serve/src/llm_serve/runtime/ollama_backend.py)
 
 ## Model Switching Flow
@@ -75,7 +77,7 @@ Relevant files:
 3. The switch waits for in-flight backend usage to drain, starts the new backend, swaps the active model, and shuts down the old backend.
 4. In `ollama` mode, `/api/pull` is only an optional convenience proxy to the upstream Ollama daemon; normal inference still assumes the model may already be available there.
 5. In `vllm` mode, the first backend load may inspect host GPUs and derive a safe vLLM memory-utilization ratio before the engine starts.
-6. vLLM worker tracking now snapshots descendant PIDs, not only direct children, so shutdown and atexit cleanup can still kill CUDA-owning grandchildren that outlive their immediate parent.
+6. Every vLLM worker starts in its own process group, so normal shutdown, interrupted startup, and atexit cleanup terminate the complete worker group.
 7. During the switch, requests for the target model receive `202`; conflicting switch requests receive `409`.
 
 ## Batch Flow

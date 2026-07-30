@@ -13,7 +13,11 @@ from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from llm_serve.batch import BatchManager
 from llm_serve.config import Settings
 from llm_serve.errors import BadRequestError, ConflictError, ServiceError
-from llm_serve.prompting import render_messages_to_prompt
+from llm_serve.request_builders import (
+    build_ollama_chat_request,
+    build_ollama_generate_request,
+    build_openai_chat_request,
+)
 from llm_serve.schemas import (
     BatchCreateRequest,
     OllamaChatRequest,
@@ -22,7 +26,6 @@ from llm_serve.schemas import (
     PullRequest,
 )
 from llm_serve.storage import StorageManager
-from llm_serve.tokenization import estimate_messages_tokens, estimate_text_tokens
 from llm_serve.types import InferenceRequest, InferenceResult, LoadStatus
 
 from .runtime.manager import RuntimeManager
@@ -94,20 +97,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     @app.post("/v1/chat/completions")
     async def openai_chat_completions(payload: OpenAIChatRequest):
         model_id = runtime.resolve_model(payload.model, payload.reasoning_effort)
-        prompt_tokens = estimate_messages_tokens([message.model_dump() for message in payload.messages])
-        _validate_input_tokens(prompt_tokens, settings.max_input_tokens)
-        output_tokens = min(payload.resolved_max_tokens(settings.max_output_tokens), settings.max_output_tokens)
-        request_model = InferenceRequest(
-            model_id=model_id,
-            prompt=render_messages_to_prompt(payload.messages),
-            max_output_tokens=output_tokens,
-            temperature=payload.temperature if payload.temperature is not None else settings.default_temperature,
-            top_p=payload.top_p if payload.top_p is not None else settings.default_top_p,
-            stream=payload.stream,
-            reasoning_effort=payload.reasoning_effort,
-            include_reasoning=payload.include_reasoning,
-            messages=[message.model_dump() for message in payload.messages],
-        )
+        request_model = build_openai_chat_request(payload, model_id, settings)
 
         load_status = runtime.check_readiness(model_id)
         if not load_status.ready:
@@ -156,21 +146,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         options = payload.options
         reasoning_effort = options.reasoning_effort if options is not None else None
         model_id = runtime.resolve_model(payload.model, reasoning_effort)
-        prompt_tokens = estimate_messages_tokens([message.model_dump() for message in payload.messages])
-        _validate_input_tokens(prompt_tokens, settings.max_input_tokens)
-        output_tokens = _resolve_ollama_output_tokens(payload, settings.max_output_tokens)
-
-        request_model = InferenceRequest(
-            model_id=model_id,
-            prompt=render_messages_to_prompt(payload.messages),
-            max_output_tokens=output_tokens,
-            temperature=_resolve_ollama_temperature(payload, settings.default_temperature),
-            top_p=_resolve_ollama_top_p(payload, settings.default_top_p),
-            stream=payload.stream,
-            reasoning_effort=reasoning_effort,
-            include_reasoning=bool(options.include_reasoning) if options is not None else False,
-            messages=[message.model_dump() for message in payload.messages],
-        )
+        request_model = build_ollama_chat_request(payload, model_id, settings)
 
         load_status = runtime.check_readiness(model_id)
         if not load_status.ready:
@@ -189,19 +165,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         options = payload.options
         reasoning_effort = options.reasoning_effort if options is not None else None
         model_id = runtime.resolve_model(payload.model, reasoning_effort)
-        prompt_tokens = estimate_text_tokens(payload.prompt)
-        _validate_input_tokens(prompt_tokens, settings.max_input_tokens)
-
-        request_model = InferenceRequest(
-            model_id=model_id,
-            prompt=payload.prompt,
-            max_output_tokens=_resolve_ollama_output_tokens(payload, settings.max_output_tokens),
-            temperature=_resolve_ollama_temperature(payload, settings.default_temperature),
-            top_p=_resolve_ollama_top_p(payload, settings.default_top_p),
-            stream=payload.stream,
-            reasoning_effort=reasoning_effort,
-            include_reasoning=bool(options.include_reasoning) if options is not None else False,
-        )
+        request_model = build_ollama_generate_request(payload, model_id, settings)
 
         load_status = runtime.check_readiness(model_id)
         if not load_status.ready:
@@ -231,11 +195,6 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         return _load_pending_json_response(status, _ollama_load_response(status))
 
     return app
-
-
-def _validate_input_tokens(estimated_tokens: int, max_input_tokens: int) -> None:
-    if estimated_tokens > max_input_tokens:
-        raise BadRequestError("Prompt too long: estimated %s tokens, max is %s" % (estimated_tokens, max_input_tokens))
 
 
 def _openai_load_response(load_status: LoadStatus):
@@ -389,24 +348,3 @@ async def _ollama_generate_stream(runtime: RuntimeManager, request_model: Infere
             "total_response": full_text,
         }
     ) + "\n"
-
-
-def _resolve_ollama_output_tokens(payload, default_value: int) -> int:
-    options = payload.options
-    if options is None or options.num_predict is None:
-        return default_value
-    return min(options.num_predict, default_value)
-
-
-def _resolve_ollama_temperature(payload, default_value: float) -> float:
-    options = payload.options
-    if options is None or options.temperature is None:
-        return default_value
-    return options.temperature
-
-
-def _resolve_ollama_top_p(payload, default_value: float) -> float:
-    options = payload.options
-    if options is None or options.top_p is None:
-        return default_value
-    return options.top_p
