@@ -5,7 +5,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MODEL_CACHE_DIR="${MODEL_CACHE_DIR:-$ROOT_DIR/data/models}"
+MODEL_CACHE_DIR="${MODEL_CACHE_DIR:-$ROOT_DIR/models}"
 
 dotenv_value() {
   python3 - "$ROOT_DIR/.env" "$1" <<'PY'

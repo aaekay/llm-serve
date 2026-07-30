@@ -349,10 +349,18 @@ class RuntimeManager:
     async def _await_switch(self, task: Optional[asyncio.Task[None]]) -> None:
         if task is None:
             return
+        timeout = self.settings.switch_timeout_seconds
+        timeout_name = "SWITCH_TIMEOUT_SECONDS"
+        if self.settings.inference_backend == "vllm" and self.settings.vllm_gpu_mode == "auto":
+            timeout = self.settings.vllm_autotune_timeout_seconds
+            timeout_name = "VLLM_AUTOTUNE_TIMEOUT_SECONDS"
         try:
-            await asyncio.wait_for(asyncio.shield(task), timeout=self.settings.switch_timeout_seconds)
+            await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
         except asyncio.TimeoutError as exc:
-            raise GatewayTimeoutError("Model switch timed out") from exc
+            raise GatewayTimeoutError(
+                "Model switch timed out after %.0f seconds; increase %s if startup is still progressing"
+                % (timeout, timeout_name)
+            ) from exc
 
     async def _perform_switch(self, model_id: str, pull_first: bool = False) -> None:
         self._last_switch_error = None

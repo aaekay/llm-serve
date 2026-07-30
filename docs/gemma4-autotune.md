@@ -37,6 +37,7 @@ VLLM_LANGUAGE_MODEL_ONLY=true
 VLLM_MAX_MODEL_LEN=8192
 VLLM_MAX_NUM_BATCHED_TOKENS=8192
 VLLM_AUTOTUNE_ON_MISS=true
+VLLM_AUTOTUNE_TIMEOUT_SECONDS=7200
 VLLM_AUTOTUNE_SLO_MULTIPLIER=2.0
 VLLM_AUTOTUNE_MAX_CONCURRENCY=64
 ```
@@ -48,6 +49,8 @@ uv run --extra runtime llm-serve tune
 ```
 
 Use `--force` to ignore an existing matching profile. Normal server startup also tunes when the profile is missing or stale and `VLLM_AUTOTUNE_ON_MISS=true`; readiness remains blocked while candidates are loading and benchmarking.
+
+Auto-mode model preparation uses `VLLM_AUTOTUNE_TIMEOUT_SECONDS` (two hours by default), rather than the shorter outer switch deadline. Each worker startup is still bounded by `SWITCH_TIMEOUT_SECONDS`. Increase the autotune timeout if the terminal is still reporting active benchmark requests near that deadline.
 
 Auto mode inspects the selected GPUs and their interconnects, rejects incompatible or memory-infeasible BF16 tensor-parallel widths, and benchmarks each remaining topology. On four 24 GB cards this normally compares two TP=2 replicas with one TP=4 replica. The result with the highest aggregate token throughput is selected only if every workload bucket remains within the configured p95 latency multiplier.
 
@@ -71,6 +74,8 @@ Override it with `VLLM_AUTOTUNE_WORKLOAD_FILE`. The file may contain a list dire
 ```
 
 Profiles live under `data/runtime/tuning/` by default. They are invalidated when the model revision, vLLM version, GPU identity/topology, effective memory allocation, benchmark workload, latency target, context length, or scheduler limits change.
+
+The profile JSON is written only after every candidate finishes and a winner is selected. An interrupted or timed-out tune leaves no partial profile. The separate startup self-test and legacy fixed/manual concurrency sweep report through logs and `/healthz`; they do not write result files.
 
 `GET /healthz` reports the selected tensor-parallel size, replica count, tuned foreground concurrency, measured throughput, latency ratio, and unhealthy worker count. Batch requests use otherwise-idle capacity and stop being admitted whenever foreground work is queued.
 

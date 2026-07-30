@@ -74,6 +74,7 @@ class Settings:
     model_cache_dir: Path
     request_timeout_seconds: float
     switch_timeout_seconds: float
+    vllm_autotune_timeout_seconds: float
     startup_load_default_model: bool
     startup_self_test_enabled: bool
     startup_self_test_blocking: bool
@@ -139,7 +140,7 @@ class Settings:
         default_model_id = env_source.get("DEFAULT_MODEL_ID", model_allowlist[0] if model_allowlist else "")
         vllm_default_model_id = _optional_str(env_source.get("VLLM_DEFAULT_MODEL_ID"))
         ollama_default_model_id = _optional_str(env_source.get("OLLAMA_DEFAULT_MODEL_ID"))
-        model_cache_dir = _optional_str(env_source.get("MODEL_CACHE_DIR")) or "data/models"
+        model_cache_dir = _optional_str(env_source.get("MODEL_CACHE_DIR")) or "models"
 
         settings = cls(
             host=env_source.get("HOST", "127.0.0.1"),
@@ -166,6 +167,9 @@ class Settings:
             model_cache_dir=(root / model_cache_dir).resolve(),
             request_timeout_seconds=float(env_source.get("REQUEST_TIMEOUT_SECONDS", "120")),
             switch_timeout_seconds=float(env_source.get("SWITCH_TIMEOUT_SECONDS", "600")),
+            vllm_autotune_timeout_seconds=float(
+                env_source.get("VLLM_AUTOTUNE_TIMEOUT_SECONDS", "7200")
+            ),
             startup_load_default_model=_parse_bool(
                 env_source.get("STARTUP_LOAD_DEFAULT_MODEL", "true"),
                 "STARTUP_LOAD_DEFAULT_MODEL",
@@ -378,6 +382,10 @@ class Settings:
             raise ValueError("MAX_INPUT_TOKENS must be at least 1")
         if self.max_output_tokens < 1:
             raise ValueError("MAX_OUTPUT_TOKENS must be at least 1")
+        if self.switch_timeout_seconds <= 0:
+            raise ValueError("SWITCH_TIMEOUT_SECONDS must be greater than 0")
+        if self.vllm_autotune_timeout_seconds <= 0:
+            raise ValueError("VLLM_AUTOTUNE_TIMEOUT_SECONDS must be greater than 0")
         if self.startup_self_test_max_output_tokens < 1:
             raise ValueError("STARTUP_SELF_TEST_MAX_OUTPUT_TOKENS must be at least 1")
         if self.startup_self_test_max_output_tokens > self.max_output_tokens:

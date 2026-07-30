@@ -29,7 +29,7 @@
 ## Model Cache
 
 - This cache is only used in `vllm` mode.
-- `MODEL_CACHE_DIR` defaults to the repo-local `data/models/`.
+- `MODEL_CACHE_DIR` defaults to the repo-local `models/`.
 - Before vLLM is initialized, the backend creates that directory and exports `HF_HOME`, `HUGGINGFACE_HUB_CACHE`, and `TRANSFORMERS_CACHE` under it.
 - As a result, model weights and Hugging Face cache artifacts stay inside the repo-local cache tree unless the config is changed.
 

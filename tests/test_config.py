@@ -33,7 +33,28 @@ def test_settings_loads_csv_and_boolean_fields(tmp_path):
     assert settings.ollama_request_timeout_seconds == 120
     assert settings.ollama_request_timeout_retry_enabled is True
     assert settings.ollama_request_timeout_retry_multiplier == 2.0
+    assert settings.vllm_autotune_timeout_seconds == 7200
     assert settings.effective_default_model_id == "mock/default"
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("SWITCH_TIMEOUT_SECONDS", "0"),
+        ("VLLM_AUTOTUNE_TIMEOUT_SECONDS", "-1"),
+    ],
+)
+def test_settings_rejects_non_positive_model_load_timeouts(tmp_path, name, value):
+    with pytest.raises(ValueError, match=name):
+        Settings.load(
+            base_dir=tmp_path,
+            environ={
+                "DEFAULT_MODEL_ID": "mock/default",
+                "MODEL_ALLOWLIST": "mock/default",
+                "REASONING_MODEL_ALLOWLIST": "",
+                name: value,
+            },
+        )
 
 
 def test_settings_rejects_invalid_default_model(tmp_path):

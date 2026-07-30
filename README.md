@@ -20,7 +20,7 @@ The default mock-safe code path exists to keep tests lightweight. For real model
 - Interactive requests are capped by `PROMPT_MAX_PARALLEL`, which defaults to `8`. Batch items are capped by `BATCH_MAX_PARALLEL`, which defaults to `4`.
 - `/healthz` reports `foreground_active`/`foreground_capacity` and `batch_active`/`batch_capacity`, so you can see whether work is actively overlapping or only queueing.
 - Batch uploads, metadata, and generated outputs are stored under `STORAGE_ROOT`.
-- In `vllm` mode, model downloads and Hugging Face cache files are stored under `MODEL_CACHE_DIR`, which defaults to the repo-local `data/models/`.
+- In `vllm` mode, model downloads and Hugging Face cache files are stored under `MODEL_CACHE_DIR`, which defaults to the repo-local `models/`.
 - `run-server.sh` is the canonical API entrypoint for `/v1/*`, `/api/*`, files, batches, and health. It prefers the repo-local `.venv` Python when available, falls back to `uv run llm-serve`, and keeps a small shell supervisor alive so Ctrl+C can terminate the whole server process group.
 - `run-qwen35-27b.sh` is only for direct raw `vllm serve` debugging or benchmarking. It does not expose the full `llm-serve` API surface.
 - `run-server.sh` does not auto-install the vLLM optional dependency set. If you run `INFERENCE_BACKEND=vllm`, install it first with `uv sync --extra runtime`.
@@ -42,5 +42,6 @@ The default mock-safe code path exists to keep tests lightweight. For real model
 - If you disable auto-selection, `CUDA_VISIBLE_DEVICES` is used directly and `VLLM_GPU_MEMORY_UTILIZATION` stays fixed.
 - In the default `VLLM_GPU_MODE=manual`, `VLLM_GPU_COUNT` maps to vLLM `tensor_parallel_size`. It must be compatible with the model; for example, a setting of `3` can fail on models whose tensor-parallel dimensions are not divisible by `3`.
 - Set `VLLM_GPU_MODE=auto` to reinterpret `VLLM_GPU_COUNT` as a total GPU budget. Auto mode benchmarks compatible tensor-parallel/replica layouts, persists the winner under `STORAGE_ROOT/tuning/`, and exposes it through `/healthz`.
+- Auto-mode model preparation uses `VLLM_AUTOTUNE_TIMEOUT_SECONDS` (default `7200`) so a complete topology sweep can finish; `SWITCH_TIMEOUT_SECONDS` continues to bound each individual worker startup and non-auto model switches.
 - Set `VLLM_GPU_MODE=fixed` with `VLLM_TENSOR_PARALLEL_SIZE` and `VLLM_REPLICA_COUNT` to force a worker layout without tuning. Their product must equal `VLLM_GPU_COUNT`; for example, TP=1 and replicas=4 creates four independent one-GPU workers.
 - `VLLM_DTYPE` defaults to `bfloat16`, which is optimal for Qwen3.5-27B inference speed on modern GPUs.

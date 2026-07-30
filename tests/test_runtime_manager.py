@@ -448,3 +448,22 @@ def test_runtime_manager_shutdown_cleans_partially_started_backend(tmp_path):
     shutdown_called, active_model_id = asyncio.run(scenario())
     assert shutdown_called is True
     assert active_model_id is None
+
+
+def test_auto_vllm_switch_uses_full_autotune_timeout(tmp_path):
+    settings = make_settings(
+        tmp_path,
+        INFERENCE_BACKEND="vllm",
+        VLLM_GPU_MODE="auto",
+        SWITCH_TIMEOUT_SECONDS="0.001",
+        VLLM_AUTOTUNE_TIMEOUT_SECONDS="0.1",
+        STARTUP_LOAD_DEFAULT_MODEL="false",
+    )
+
+    async def scenario():
+        runtime = RuntimeManager(settings)
+        task = asyncio.create_task(asyncio.sleep(0.02))
+        await runtime._await_switch(task)
+        return task.done()
+
+    assert asyncio.run(scenario()) is True
