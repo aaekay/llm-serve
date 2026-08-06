@@ -158,10 +158,25 @@ class VLLMWorker:
                 ),
             }
         )
+        if self.settings.vllm_show_download_progress:
+            env["HF_HUB_DISABLE_PROGRESS_BARS"] = "0"
+            env["HF_HUB_VERBOSITY"] = "info"
+            env["VLLM_LOGGING_LEVEL"] = "INFO"
+            env["PYTHONUNBUFFERED"] = "1"
+            env.pop("TQDM_DISABLE", None)
+            logger.info(
+                "Hugging Face download progress is enabled for model '%s'; cache=%s",
+                self.model_id,
+                self.settings.model_cache_dir,
+            )
+        else:
+            env["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
         self.settings.model_cache_dir.mkdir(parents=True, exist_ok=True)
         self.process = await self._process_factory(
             *self.command(),
             env=env,
+            stdout=None,
+            stderr=None,
             start_new_session=True,
         )
         _tracked_pool_worker_pids.add(self.process.pid)

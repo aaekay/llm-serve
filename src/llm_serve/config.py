@@ -107,6 +107,7 @@ class Settings:
     vllm_tool_call_parsers: Dict[str, str]
     vllm_reasoning_parsers: Dict[str, str]
     vllm_responses_store_enabled: bool
+    vllm_show_download_progress: bool
     vllm_max_model_len: Optional[int]
     vllm_gdn_prefill_backend: Optional[str]
     vllm_disable_custom_all_reduce: bool
@@ -249,6 +250,10 @@ class Settings:
             vllm_responses_store_enabled=_parse_bool(
                 env_source.get("VLLM_RESPONSES_STORE_ENABLED", "false"),
                 "VLLM_RESPONSES_STORE_ENABLED",
+            ),
+            vllm_show_download_progress=_parse_bool(
+                env_source.get("VLLM_SHOW_DOWNLOAD_PROGRESS", "true"),
+                "VLLM_SHOW_DOWNLOAD_PROGRESS",
             ),
             vllm_max_model_len=(
                 int(env_source["VLLM_MAX_MODEL_LEN"])

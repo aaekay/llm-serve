@@ -294,6 +294,7 @@ def test_pool_preserves_per_request_thinking_controls(tmp_path):
 
 def test_worker_passes_runtime_and_cache_environment(tmp_path, monkeypatch):
     captured = {}
+    monkeypatch.setenv("TQDM_DISABLE", "1")
     settings = make_settings(
         tmp_path,
         INFERENCE_BACKEND="vllm",
@@ -305,6 +306,8 @@ def test_worker_passes_runtime_and_cache_environment(tmp_path, monkeypatch):
     async def process_factory(*command, **kwargs):
         captured["command"] = command
         captured["env"] = kwargs["env"]
+        captured["stdout"] = kwargs["stdout"]
+        captured["stderr"] = kwargs["stderr"]
         return SimpleNamespace(pid=100, returncode=None)
 
     class HealthyClient:
@@ -338,3 +341,9 @@ def test_worker_passes_runtime_and_cache_environment(tmp_path, monkeypatch):
     assert captured["env"]["TRANSFORMERS_CACHE"] == str(settings.transformers_cache)
     assert captured["env"]["VLLM_USE_V1"] == "1"
     assert captured["env"]["VLLM_SKIP_GDN_WARMUP"] == "1"
+    assert captured["env"]["HF_HUB_DISABLE_PROGRESS_BARS"] == "0"
+    assert captured["env"]["HF_HUB_VERBOSITY"] == "info"
+    assert captured["env"]["PYTHONUNBUFFERED"] == "1"
+    assert "TQDM_DISABLE" not in captured["env"]
+    assert captured["stdout"] is None
+    assert captured["stderr"] is None
