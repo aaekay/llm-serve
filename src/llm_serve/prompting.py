@@ -11,7 +11,9 @@ _THINK_CLOSE_TAG = "</think>"
 _THINK_BLOCK_RE = re.compile(r"<think>\s*(.*?)\s*</think>\s*", re.DOTALL)
 
 
-def extract_text_content(content: Union[str, List[ContentPart]]) -> str:
+def extract_text_content(content: Optional[Union[str, List[ContentPart]]]) -> str:
+    if content is None:
+        return ""
     if isinstance(content, str):
         return content
     parts = []

@@ -60,31 +60,19 @@ def test_reasoning_allowlist_is_enforced(tmp_path):
     assert "REASONING_MODEL_ALLOWLIST" in response.json()["error"]["message"]
 
 
-def test_request_to_unloaded_model_returns_202_then_succeeds(tmp_path):
+def test_request_to_unloaded_model_waits_then_succeeds(tmp_path):
     settings = make_settings(tmp_path)
 
     with TestClient(create_app(settings)) as client:
-        first = client.post(
+        response = client.post(
             "/v1/chat/completions",
             json={
                 "model": "mock/reasoning",
                 "messages": [{"role": "user", "content": "Switch models"}],
             },
         )
-        assert first.status_code == 202
-        assert first.headers["Retry-After"] == "2"
-        assert first.json()["retry_after_seconds"] == 2
-        time.sleep(0.05)
-        second = client.post(
-            "/v1/chat/completions",
-            json={
-                "model": "mock/reasoning",
-                "messages": [{"role": "user", "content": "Switch models"}],
-            },
-        )
-
-    assert second.status_code == 200
-    assert second.json()["model"] == "mock/reasoning"
+    assert response.status_code == 200
+    assert response.json()["model"] == "mock/reasoning"
 
 
 def test_openai_streaming_endpoint_emits_done_marker(tmp_path):
@@ -106,20 +94,45 @@ def test_openai_streaming_endpoint_emits_done_marker(tmp_path):
     assert "chat.completion.chunk" in body
 
 
-def test_openai_request_rejects_tool_messages(tmp_path):
+def test_openai_request_accepts_tool_messages(tmp_path):
     settings = make_settings(tmp_path)
 
     with TestClient(create_app(settings)) as client:
         response = client.post(
             "/v1/chat/completions",
             json={
-                "messages": [{"role": "tool", "content": "Tool output"}],
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {"name": "lookup", "arguments": "{}"},
+                            }
+                        ],
+                    },
+                    {"role": "tool", "tool_call_id": "call-1", "content": "Tool output"},
+                ],
                 "stream": False,
             },
         )
 
+    assert response.status_code == 200
+
+
+def test_openai_tool_message_requires_call_id(tmp_path):
+    settings = make_settings(tmp_path)
+
+    with TestClient(create_app(settings)) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "tool", "content": "Tool output"}]},
+        )
+
     assert response.status_code == 400
-    assert "Input should be 'system', 'user' or 'assistant'" in response.json()["error"]["message"]
+    assert "tool_call_id" in response.json()["error"]["message"]
 
 
 def test_openai_request_rejects_top_p_zero(tmp_path):

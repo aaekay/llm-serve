@@ -163,7 +163,11 @@ class RuntimeManager:
 
     async def ensure_loaded(self, model_id: str) -> None:
         while True:
-            if self._active_model_id == model_id and self._active_backend is not None:
+            if (
+                self._active_model_id == model_id
+                and self._active_backend is not None
+                and not self.switch_in_progress
+            ):
                 return
 
             task = self._switch_task
@@ -173,7 +177,11 @@ class RuntimeManager:
                 continue
 
             async with self._switch_lock:
-                if self._active_model_id == model_id and self._active_backend is not None:
+                if (
+                    self._active_model_id == model_id
+                    and self._active_backend is not None
+                    and not self.switch_in_progress
+                ):
                     return
                 if self._switch_task is None or self._switch_task.done():
                     self._switch_target_model = model_id
@@ -234,6 +242,68 @@ class RuntimeManager:
             lane="batch",
             wait_for_model=True,
         )
+
+    async def openai_chat(self, model_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        await self.ensure_loaded(model_id)
+        async with self._vllm_foreground_backend(model_id) as backend:
+            return await backend.openai_chat(payload)
+
+    async def openai_chat_stream(
+        self,
+        model_id: str,
+        payload: Dict[str, Any],
+    ) -> AsyncIterator[Dict[str, Any]]:
+        await self.ensure_loaded(model_id)
+        async with self._vllm_foreground_backend(model_id) as backend:
+            stream = self._timeout_stream(
+                backend.openai_chat_stream(payload),
+                self.settings.request_timeout_seconds,
+            )
+            async for event in stream:
+                yield event
+
+    async def create_response(self, model_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        await self.ensure_loaded(model_id)
+        async with self._vllm_foreground_backend(model_id) as backend:
+            return await backend.create_response(payload)
+
+    async def create_response_stream(
+        self,
+        model_id: str,
+        payload: Dict[str, Any],
+    ) -> AsyncIterator[Dict[str, Any]]:
+        await self.ensure_loaded(model_id)
+        async with self._vllm_foreground_backend(model_id) as backend:
+            stream = self._timeout_stream(
+                backend.create_response_stream(payload),
+                self.settings.request_timeout_seconds,
+            )
+            async for event in stream:
+                yield event
+
+    async def retrieve_response(self, response_id: str) -> Dict[str, Any]:
+        async with self._backend_usage():
+            backend = self._require_vllm_backend()
+            return await backend.retrieve_response(response_id)
+
+    async def retrieve_response_stream(
+        self,
+        response_id: str,
+        starting_after: Optional[int] = None,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        async with self._backend_usage():
+            backend = self._require_vllm_backend()
+            stream = self._timeout_stream(
+                backend.retrieve_response_stream(response_id, starting_after),
+                self.settings.request_timeout_seconds,
+            )
+            async for event in stream:
+                yield event
+
+    async def cancel_response(self, response_id: str) -> Dict[str, Any]:
+        async with self._backend_usage():
+            backend = self._require_vllm_backend()
+            return await backend.cancel_response(response_id)
 
     @property
     def active_model_id(self) -> Optional[str]:
@@ -349,6 +419,10 @@ class RuntimeManager:
     async def _perform_switch(self, model_id: str, pull_first: bool = False) -> None:
         self._last_switch_error = None
         await self._usage_idle.wait()
+        active_backend = self._active_backend
+        wait_for_background = getattr(active_backend, "wait_for_background", None)
+        if callable(wait_for_background):
+            await wait_for_background()
         if pull_first and self.settings.inference_backend == "ollama":
             client = self._ollama_client_factory(self.settings)
             try:
@@ -440,6 +514,37 @@ class RuntimeManager:
         if self._active_backend is None or self._active_model_id != model_id:
             raise ConflictError("Requested model '%s' is not currently loaded" % model_id)
         return self._active_backend
+
+    def _require_vllm_backend(self):
+        if self.settings.inference_backend != "vllm" or self._active_backend is None:
+            raise BadRequestError("This endpoint requires INFERENCE_BACKEND=vllm")
+        return self._active_backend
+
+    @asynccontextmanager
+    async def _vllm_foreground_backend(self, model_id: str):
+        if self.settings.inference_backend != "vllm":
+            raise BadRequestError("Agent-compatible OpenAI proxying requires INFERENCE_BACKEND=vllm")
+        async with self._pending_lock:
+            limit = self._foreground_capacity + self.settings.foreground_queue_limit
+            if self._foreground_pending >= limit:
+                raise TooManyRequestsError("Foreground queue is full")
+            self._foreground_pending += 1
+        foreground_acquired = False
+        total_acquired = False
+        try:
+            await self._foreground_semaphore.acquire()
+            foreground_acquired = True
+            await self._total_semaphore.acquire()
+            total_acquired = True
+            async with self._backend_usage():
+                yield self._require_active_backend(model_id)
+        finally:
+            async with self._pending_lock:
+                self._foreground_pending -= 1
+            if total_acquired:
+                self._total_semaphore.release()
+            if foreground_acquired:
+                self._foreground_semaphore.release()
 
     @asynccontextmanager
     async def _backend_usage(self):

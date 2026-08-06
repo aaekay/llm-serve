@@ -17,12 +17,15 @@ PUBLIC_ROUTES = {
     ("GET", "/v1/files/{file_id}"),
     ("GET", "/v1/files/{file_id}/content"),
     ("GET", "/v1/models"),
+    ("GET", "/v1/responses/{response_id}"),
     ("POST", "/api/chat"),
     ("POST", "/api/generate"),
     ("POST", "/api/pull"),
     ("POST", "/v1/batches"),
     ("POST", "/v1/batches/{batch_id}/cancel"),
     ("POST", "/v1/chat/completions"),
+    ("POST", "/v1/responses"),
+    ("POST", "/v1/responses/{response_id}/cancel"),
     ("POST", "/v1/files"),
 }
 

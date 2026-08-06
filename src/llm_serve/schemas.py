@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class TextContentPart(BaseModel):
@@ -19,11 +19,32 @@ ContentPart = Union[TextContentPart, ImageContentPart]
 
 
 class ChatMessage(BaseModel):
-    role: Literal["system", "user", "assistant"]
-    content: Union[str, List[ContentPart]]
+    model_config = ConfigDict(extra="allow")
+
+    role: Literal["system", "developer", "user", "assistant", "tool"]
+    content: Optional[Union[str, List[ContentPart]]] = None
+    name: Optional[str] = None
+    tool_call_id: Optional[str] = None
+    tool_calls: Optional[List[Dict[str, Any]]] = None
+
+    @model_validator(mode="after")
+    def validate_agent_message(self) -> "ChatMessage":
+        if self.role == "assistant" and (self.content is not None or self.tool_calls):
+            return self
+        if self.role == "tool":
+            if not self.tool_call_id:
+                raise ValueError("tool messages require tool_call_id")
+            if self.content is None:
+                raise ValueError("tool messages require content")
+            return self
+        if self.content is None:
+            raise ValueError("content is required unless the message contains tool calls")
+        return self
 
 
 class OpenAIChatRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     messages: List[ChatMessage]
     model: Optional[str] = None
     stream: bool = False
@@ -33,6 +54,16 @@ class OpenAIChatRequest(BaseModel):
     max_completion_tokens: Optional[int] = Field(default=None, ge=1)
     reasoning_effort: Optional[Literal["low", "medium", "high"]] = None
     include_reasoning: bool = False
+    tools: Optional[List[Dict[str, Any]]] = None
+    tool_choice: Optional[Union[Literal["none", "auto", "required"], Dict[str, Any]]] = None
+    parallel_tool_calls: Optional[bool] = None
+    stream_options: Optional[Dict[str, Any]] = None
+    response_format: Optional[Dict[str, Any]] = None
+    stop: Optional[Union[str, List[str]]] = None
+    seed: Optional[int] = None
+    presence_penalty: Optional[float] = Field(default=None, ge=-2, le=2)
+    frequency_penalty: Optional[float] = Field(default=None, ge=-2, le=2)
+    n: int = Field(default=1, ge=1)
 
     @field_validator("messages")
     @classmethod
@@ -47,6 +78,15 @@ class OpenAIChatRequest(BaseModel):
         if self.max_tokens is not None:
             return self.max_tokens
         return default_value
+
+    def upstream_payload(self, model_id: str, default_max_tokens: int) -> Dict[str, Any]:
+        payload = self.model_dump(exclude_none=True)
+        payload["model"] = model_id
+        payload["max_tokens"] = min(self.resolved_max_tokens(default_max_tokens), default_max_tokens)
+        payload.pop("max_completion_tokens", None)
+        payload.pop("include_reasoning", None)
+        payload.pop("reasoning_effort", None)
+        return payload
 
 
 class OllamaOptions(BaseModel):

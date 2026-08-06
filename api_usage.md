@@ -31,6 +31,9 @@ Backend notes:
 ### Endpoints
 
 - `POST /v1/chat/completions`
+- `POST /v1/responses` (vLLM backend)
+- `GET /v1/responses/{response_id}` (vLLM backend)
+- `POST /v1/responses/{response_id}/cancel` (vLLM backend)
 - `GET /v1/models`
 - `POST /v1/files`
 - `GET /v1/files/{file_id}`
@@ -42,7 +45,7 @@ Backend notes:
 ### `POST /v1/chat/completions` Request Fields
 
 - `messages` (required): array of `{ "role": "...", "content": "..." }`
-- `role` values: `system`, `user`, `assistant`
+- `role` values: `system`, `developer`, `user`, `assistant`, `tool`
 - `model` (optional): requested model ID
 - `stream` (optional, default `false`): `true` for SSE output
 - `temperature` (optional): `0.0` to `2.0`
@@ -51,6 +54,14 @@ Backend notes:
 - `max_completion_tokens` (optional): `1` to `MAX_OUTPUT_TOKENS` (takes precedence over `max_tokens`; values above it are clamped)
 - `reasoning_effort` (optional): `low`, `medium`, or `high`
 - `include_reasoning` (optional, default `false`): include extracted reasoning text in non-stream response
+- `tools`, `tool_choice`, and `parallel_tool_calls`: standard OpenAI function-calling fields
+- `stream_options`, `response_format`, penalties, stop sequences, seed, and additional
+  OpenAI/vLLM fields are preserved on the vLLM backend
+
+Tool-bearing requests require a parser entry for the selected model in
+`VLLM_TOOL_CALL_PARSERS`. Streaming tool calls are returned as native
+`delta.tool_calls` fragments and terminate with `finish_reason: "tool_calls"`.
+See [coding-agent provider setup](docs/agent-providers.md) for complete client examples.
 
 Allowlist policy:
 

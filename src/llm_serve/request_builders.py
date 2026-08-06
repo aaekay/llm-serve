@@ -4,7 +4,7 @@ from llm_serve.config import Settings
 from llm_serve.errors import BadRequestError
 from llm_serve.prompting import render_messages_to_prompt
 from llm_serve.schemas import OllamaChatRequest, OllamaGenerateRequest, OpenAIChatRequest
-from llm_serve.tokenization import estimate_messages_tokens, estimate_text_tokens
+from llm_serve.tokenization import estimate_messages_tokens, estimate_text_tokens, estimate_tools_tokens
 from llm_serve.types import InferenceRequest
 
 
@@ -17,7 +17,10 @@ def build_openai_chat_request(
     timeout_retry_enabled: bool = True,
 ) -> InferenceRequest:
     messages = [message.model_dump() for message in payload.messages]
-    _validate_input_tokens(estimate_messages_tokens(messages), settings.max_input_tokens)
+    estimated_tokens = estimate_messages_tokens(messages)
+    if payload.tools:
+        estimated_tokens += estimate_tools_tokens(payload.tools)
+    _validate_input_tokens(estimated_tokens, settings.max_input_tokens)
     return InferenceRequest(
         model_id=model_id,
         prompt=render_messages_to_prompt(payload.messages),

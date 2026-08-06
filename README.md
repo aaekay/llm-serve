@@ -2,7 +2,8 @@
 
 `llm-serve` is a local text-generation gateway with OpenAI-compatible (`/v1/*`)
 and Ollama-compatible (`/api/*`) APIs. It supports mock, upstream Ollama, and
-local vLLM inference, plus disk-backed batch processing.
+local vLLM inference, plus disk-backed batch processing. The vLLM path supports
+agent tool calling and the OpenAI Responses API for Hermes, OpenCode, and Pi.
 
 ## Start
 
@@ -47,6 +48,7 @@ does not expose the complete `llm-serve` API.
 ## Documentation
 
 - [API usage](api_usage.md)
+- [Hermes, OpenCode, and Pi provider setup](docs/agent-providers.md)
 - [Request and startup flow](docs/codeflow.md)
 - [Qwen with vLLM](docs/qwen-vllm.md)
 - [Gemma 4 autotuning](docs/gemma4-autotune.md)
@@ -60,4 +62,5 @@ uv run pytest -q
 uv run ruff check src tests
 bash -n run-server.sh
 bash -n run-qwen35-27b.sh
+uv run python scripts/agent_provider_smoke.py  # requires a running vLLM server
 ```

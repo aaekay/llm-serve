@@ -346,6 +346,37 @@ class AutoTunedVLLMBackend(ModelBackend):
         async for chunk in self._require_pool().generate_chat_stream(request):
             yield chunk
 
+    async def openai_chat(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return await self._require_pool().openai_chat(payload)
+
+    async def openai_chat_stream(self, payload: Dict[str, Any]) -> AsyncIterator[Dict[str, Any]]:
+        async for event in self._require_pool().openai_chat_stream(payload):
+            yield event
+
+    async def create_response(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return await self._require_pool().create_response(payload)
+
+    async def create_response_stream(self, payload: Dict[str, Any]) -> AsyncIterator[Dict[str, Any]]:
+        async for event in self._require_pool().create_response_stream(payload):
+            yield event
+
+    async def retrieve_response(self, response_id: str) -> Dict[str, Any]:
+        return await self._require_pool().retrieve_response(response_id)
+
+    async def retrieve_response_stream(
+        self,
+        response_id: str,
+        starting_after: Optional[int] = None,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        async for event in self._require_pool().retrieve_response_stream(response_id, starting_after):
+            yield event
+
+    async def cancel_response(self, response_id: str) -> Dict[str, Any]:
+        return await self._require_pool().cancel_response(response_id)
+
+    async def wait_for_background(self) -> None:
+        await self._require_pool().wait_for_background()
+
     def _require_pool(self) -> VLLMPoolBackend:
         if self._pool is None:
             raise NotReadyError("The auto-tuned vLLM worker pool is not ready")

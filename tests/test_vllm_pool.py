@@ -60,6 +60,36 @@ def test_worker_command_avoids_removed_disable_log_requests_flag(tmp_path, monke
     assert "--disable-log-requests" not in command
 
 
+def test_worker_command_enables_model_specific_agent_parsers(tmp_path, monkeypatch):
+    model = "Qwen/Qwen3.5-27B"
+    settings = make_settings(
+        tmp_path,
+        INFERENCE_BACKEND="vllm",
+        DEFAULT_MODEL_ID=model,
+        VLLM_DEFAULT_MODEL_ID=model,
+        MODEL_ALLOWLIST=model,
+        REASONING_MODEL_ALLOWLIST=model,
+        VLLM_ENABLE_AUTO_TOOL_CHOICE="true",
+        VLLM_TOOL_CALL_PARSERS='{"%s":"qwen3_coder"}' % model,
+        VLLM_REASONING_PARSERS='{"%s":"qwen3"}' % model,
+        VLLM_RESPONSES_STORE_ENABLED="true",
+    )
+    monkeypatch.setattr(vllm_pool, "_vllm_executable", lambda: "/opt/bin/vllm")
+    monkeypatch.setattr(vllm_pool, "_unused_loopback_port", lambda: 18000)
+    worker = VLLMWorker(0, model, [0], 1, settings, optimized_engine=True)
+
+    async def scenario():
+        command = worker.command()
+        await worker.stop()
+        return command
+
+    command = asyncio.run(scenario())
+
+    assert "--enable-auto-tool-choice" in command
+    assert command[command.index("--tool-call-parser") + 1] == "qwen3_coder"
+    assert command[command.index("--reasoning-parser") + 1] == "qwen3"
+
+
 def test_pool_routes_to_worker_with_least_outstanding_token_load(tmp_path):
     settings = make_settings(tmp_path, INFERENCE_BACKEND="vllm")
     pool = VLLMPoolBackend(
@@ -106,6 +136,83 @@ def test_pool_stream_releases_worker_load(tmp_path):
 
     assert "".join(chunks) == "hello world"
     assert outstanding == 0
+
+
+def test_pool_preserves_raw_tool_calls_and_response_worker_affinity(tmp_path):
+    model = "Qwen/Qwen3.5-27B"
+    settings = make_settings(
+        tmp_path,
+        INFERENCE_BACKEND="vllm",
+        DEFAULT_MODEL_ID=model,
+        VLLM_DEFAULT_MODEL_ID=model,
+        MODEL_ALLOWLIST=model,
+        REASONING_MODEL_ALLOWLIST=model,
+        VLLM_ENABLE_AUTO_TOOL_CHOICE="true",
+        VLLM_TOOL_CALL_PARSERS='{"%s":"qwen3_coder"}' % model,
+    )
+
+    class AgentWorker(FakeWorker):
+        async def request_json(self, path, payload, *, method="POST"):
+            self.calls.append((method, path, payload))
+            if path == "/v1/chat/completions":
+                return {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": None,
+                                "tool_calls": [
+                                    {
+                                        "id": "call-1",
+                                        "type": "function",
+                                        "function": {"name": "read", "arguments": "{}"},
+                                    }
+                                ],
+                            },
+                            "finish_reason": "tool_calls",
+                        }
+                    ]
+                }
+            if method == "GET":
+                return {"id": path.split("/")[-1], "status": "completed", "output": []}
+            if path.endswith("/cancel"):
+                return {"id": path.split("/")[-2], "status": "cancelled", "output": []}
+            return {
+                "id": payload["request_id"],
+                "status": "completed",
+                "output": [],
+            }
+
+    pool = VLLMPoolBackend(
+        model,
+        settings,
+        WorkerTopology(1, [[0], [1]]),
+        worker_factory=AgentWorker,
+    )
+    tool = {"type": "function", "function": {"name": "read", "parameters": {"type": "object"}}}
+
+    async def scenario():
+        await pool.start()
+        pool.workers[0].outstanding_tokens = 100
+        chat = await pool.openai_chat({"model": model, "messages": [], "tools": [tool]})
+        first = await pool.create_response({"model": model, "input": "hello", "tools": [tool]})
+        second = await pool.create_response(
+            {"model": model, "input": "continue", "previous_response_id": first["id"]}
+        )
+        retrieved = await pool.retrieve_response(first["id"])
+        cancelled = await pool.cancel_response(first["id"])
+        await pool.shutdown()
+        return chat, first, second, retrieved, cancelled
+
+    chat, first, second, retrieved, cancelled = asyncio.run(scenario())
+
+    assert chat["choices"][0]["message"]["tool_calls"][0]["id"] == "call-1"
+    assert first["id"].startswith("resp_")
+    assert second["id"].startswith("resp_")
+    owner = pool._response_workers[first["id"]]
+    owner_calls = pool.workers[owner].calls
+    assert any(call[2] and call[2].get("previous_response_id") == first["id"] for call in owner_calls)
+    assert retrieved["status"] == "completed"
+    assert cancelled["status"] == "cancelled"
 
 
 def test_pool_preserves_per_request_thinking_controls(tmp_path):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +22,21 @@ def _parse_bool(raw_value: str, field_name: str) -> bool:
 
 def _parse_csv(raw_value: str) -> List[str]:
     return [item.strip() for item in raw_value.split(",") if item.strip()]
+
+
+def _parse_string_map(raw_value: str, field_name: str) -> Dict[str, str]:
+    if not raw_value.strip():
+        return {}
+    try:
+        parsed = json.loads(raw_value)
+    except json.JSONDecodeError as exc:
+        raise ValueError("%s must be a JSON object" % field_name) from exc
+    if not isinstance(parsed, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) and key.strip() and value.strip()
+        for key, value in parsed.items()
+    ):
+        raise ValueError("%s must map non-empty model IDs to parser names" % field_name)
+    return {key.strip(): value.strip() for key, value in parsed.items()}
 
 
 def _optional_str(raw_value: Optional[str]) -> Optional[str]:
@@ -87,6 +103,10 @@ class Settings:
     vllm_enforce_eager: bool
     vllm_use_v1: bool
     vllm_language_model_only: bool
+    vllm_enable_auto_tool_choice: bool
+    vllm_tool_call_parsers: Dict[str, str]
+    vllm_reasoning_parsers: Dict[str, str]
+    vllm_responses_store_enabled: bool
     vllm_max_model_len: Optional[int]
     vllm_gdn_prefill_backend: Optional[str]
     vllm_disable_custom_all_reduce: bool
@@ -213,6 +233,22 @@ class Settings:
             vllm_language_model_only=_parse_bool(
                 env_source.get("VLLM_LANGUAGE_MODEL_ONLY", "true"),
                 "VLLM_LANGUAGE_MODEL_ONLY",
+            ),
+            vllm_enable_auto_tool_choice=_parse_bool(
+                env_source.get("VLLM_ENABLE_AUTO_TOOL_CHOICE", "false"),
+                "VLLM_ENABLE_AUTO_TOOL_CHOICE",
+            ),
+            vllm_tool_call_parsers=_parse_string_map(
+                env_source.get("VLLM_TOOL_CALL_PARSERS", "{}"),
+                "VLLM_TOOL_CALL_PARSERS",
+            ),
+            vllm_reasoning_parsers=_parse_string_map(
+                env_source.get("VLLM_REASONING_PARSERS", "{}"),
+                "VLLM_REASONING_PARSERS",
+            ),
+            vllm_responses_store_enabled=_parse_bool(
+                env_source.get("VLLM_RESPONSES_STORE_ENABLED", "false"),
+                "VLLM_RESPONSES_STORE_ENABLED",
             ),
             vllm_max_model_len=(
                 int(env_source["VLLM_MAX_MODEL_LEN"])
@@ -478,6 +514,23 @@ class Settings:
         ):
             raise ValueError(
                 "VLLM_MAX_NUM_BATCHED_TOKENS must be >= VLLM_MAX_MODEL_LEN"
+            )
+        if (
+            self.vllm_max_model_len is not None
+            and self.max_input_tokens + self.max_output_tokens > self.vllm_max_model_len
+        ):
+            raise ValueError(
+                "MAX_INPUT_TOKENS + MAX_OUTPUT_TOKENS must be <= VLLM_MAX_MODEL_LEN"
+            )
+        unknown_tool_models = set(self.vllm_tool_call_parsers) - set(self.model_allowlist)
+        if unknown_tool_models:
+            raise ValueError("VLLM_TOOL_CALL_PARSERS contains models outside MODEL_ALLOWLIST")
+        unknown_reasoning_models = set(self.vllm_reasoning_parsers) - set(self.model_allowlist)
+        if unknown_reasoning_models:
+            raise ValueError("VLLM_REASONING_PARSERS contains models outside MODEL_ALLOWLIST")
+        if self.vllm_enable_auto_tool_choice and not self.vllm_tool_call_parsers:
+            raise ValueError(
+                "VLLM_TOOL_CALL_PARSERS must not be empty when auto tool choice is enabled"
             )
         if self.vllm_swap_space_gb is not None and self.vllm_swap_space_gb < 0:
             raise ValueError("VLLM_SWAP_SPACE_GB must be non-negative when set")

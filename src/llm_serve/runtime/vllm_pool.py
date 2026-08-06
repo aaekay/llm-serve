@@ -9,6 +9,7 @@ import shutil
 import signal
 import socket
 import sys
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Sequence
@@ -16,7 +17,7 @@ from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Sequence
 import httpx
 
 from llm_serve.config import Settings
-from llm_serve.errors import NotReadyError, UpstreamRuntimeError
+from llm_serve.errors import NotFoundError, NotReadyError, UpstreamAPIError, UpstreamRuntimeError
 from llm_serve.prompting import ThinkingContentStripper, split_reasoning_output
 from llm_serve.tokenization import estimate_text_tokens
 from llm_serve.types import InferenceRequest, InferenceResult
@@ -117,6 +118,14 @@ class VLLMWorker:
             command.append("--trust-remote-code")
         if self.settings.vllm_language_model_only:
             command.extend(["--language-model-only", "--skip-mm-profiling"])
+        tool_parser = self.settings.vllm_tool_call_parsers.get(self.model_id)
+        if tool_parser:
+            if self.settings.vllm_enable_auto_tool_choice:
+                command.append("--enable-auto-tool-choice")
+            command.extend(["--tool-call-parser", tool_parser])
+        reasoning_parser = self.settings.vllm_reasoning_parsers.get(self.model_id)
+        if reasoning_parser:
+            command.extend(["--reasoning-parser", reasoning_parser])
         if self.settings.vllm_enable_prefix_caching:
             command.append("--enable-prefix-caching")
         if self.settings.vllm_enable_chunked_prefill:
@@ -144,6 +153,9 @@ class VLLMWorker:
                 "TRANSFORMERS_CACHE": str(self.settings.transformers_cache),
                 "VLLM_USE_V1": "1" if self.settings.vllm_use_v1 else "0",
                 "VLLM_SKIP_GDN_WARMUP": "1",
+                "VLLM_ENABLE_RESPONSES_API_STORE": (
+                    "1" if self.settings.vllm_responses_store_enabled else "0"
+                ),
             }
         )
         self.settings.model_cache_dir.mkdir(parents=True, exist_ok=True)
@@ -199,16 +211,30 @@ class VLLMWorker:
     def exited(self) -> bool:
         return self.process is None or self.process.returncode is not None
 
-    async def request_json(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def request_json(
+        self,
+        path: str,
+        payload: Optional[Dict[str, Any]],
+        *,
+        method: str = "POST",
+    ) -> Dict[str, Any]:
         try:
-            response = await self._client.post(path, json=payload, timeout=self.settings.request_timeout_seconds)
+            request_kwargs: Dict[str, Any] = {"timeout": self.settings.request_timeout_seconds}
+            if payload is not None:
+                request_kwargs["json"] = payload
+            response = await self._client.request(
+                method,
+                path,
+                **request_kwargs,
+            )
             response.raise_for_status()
             value = response.json()
         except httpx.HTTPStatusError as exc:
-            raise UpstreamRuntimeError(
-                "vLLM worker %s rejected a request with status %s: %s"
-                % (self.index, exc.response.status_code, exc.response.text)
-            ) from exc
+            try:
+                payload = exc.response.json()
+            except ValueError:
+                payload = {"error": {"message": exc.response.text, "type": "upstream_error"}}
+            raise UpstreamAPIError(exc.response.status_code, payload) from exc
         except httpx.RequestError as exc:
             self.healthy = False
             raise UpstreamRuntimeError("vLLM worker %s request failed: %s" % (self.index, exc)) from exc
@@ -218,11 +244,18 @@ class VLLMWorker:
             raise UpstreamRuntimeError("vLLM worker %s returned invalid JSON" % self.index)
         return value
 
-    async def stream_json(self, path: str, payload: Dict[str, Any]) -> AsyncIterator[Dict[str, Any]]:
+    async def stream_json(
+        self,
+        path: str,
+        payload: Optional[Dict[str, Any]],
+        *,
+        method: str = "POST",
+    ) -> AsyncIterator[Dict[str, Any]]:
         try:
-            async with self._client.stream(
-                "POST", path, json=payload, timeout=self.settings.request_timeout_seconds
-            ) as response:
+            request_kwargs: Dict[str, Any] = {"timeout": self.settings.request_timeout_seconds}
+            if payload is not None:
+                request_kwargs["json"] = payload
+            async with self._client.stream(method, path, **request_kwargs) as response:
                 response.raise_for_status()
                 async for line in response.aiter_lines():
                     if not line.startswith("data:"):
@@ -239,10 +272,17 @@ class VLLMWorker:
                     if isinstance(item, dict):
                         yield item
         except httpx.HTTPStatusError as exc:
-            raise UpstreamRuntimeError(
-                "vLLM worker %s rejected a stream with status %s"
-                % (self.index, exc.response.status_code)
-            ) from exc
+            try:
+                payload = await exc.response.aread()
+                parsed = json.loads(payload)
+            except (ValueError, json.JSONDecodeError):
+                parsed = {
+                    "error": {
+                        "message": "vLLM worker %s rejected a stream" % self.index,
+                        "type": "upstream_error",
+                    }
+                }
+            raise UpstreamAPIError(exc.response.status_code, parsed) from exc
         except httpx.RequestError as exc:
             self.healthy = False
             raise UpstreamRuntimeError("vLLM worker %s stream failed: %s" % (self.index, exc)) from exc
@@ -279,6 +319,10 @@ class VLLMPoolBackend(ModelBackend):
         self._selection_lock = asyncio.Lock()
         self._monitor_task: Optional[asyncio.Task[None]] = None
         self._stopping = False
+        self._response_workers: Dict[str, int] = {}
+        self._background_tasks: Dict[str, asyncio.Task[None]] = {}
+        self._background_idle = asyncio.Event()
+        self._background_idle.set()
 
     @property
     def effective_foreground_concurrency(self) -> Optional[int]:
@@ -323,6 +367,12 @@ class VLLMPoolBackend(ModelBackend):
 
     async def shutdown(self) -> None:
         self._stopping = True
+        for task in self._background_tasks.values():
+            task.cancel()
+        if self._background_tasks:
+            await asyncio.gather(*self._background_tasks.values(), return_exceptions=True)
+        self._background_tasks.clear()
+        self._background_idle.set()
         if self._monitor_task is not None:
             self._monitor_task.cancel()
             try:
@@ -345,6 +395,189 @@ class VLLMPoolBackend(ModelBackend):
     async def generate_chat_stream(self, request: InferenceRequest) -> AsyncIterator[str]:
         async for chunk in self._stream(request, chat=True):
             yield chunk
+
+    async def openai_chat(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        self._validate_tool_support(payload)
+        async with self._raw_worker_lease(payload, operation="chat.completions") as worker:
+            return await worker.request_json("/v1/chat/completions", payload)
+
+    async def openai_chat_stream(self, payload: Dict[str, Any]) -> AsyncIterator[Dict[str, Any]]:
+        self._validate_tool_support(payload)
+        async with self._raw_worker_lease(payload, operation="chat.completions.stream") as worker:
+            async for event in worker.stream_json("/v1/chat/completions", payload):
+                yield event
+
+    async def create_response(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        self._validate_tool_support(payload)
+        response_id = self._prepare_response_id(payload)
+        worker_index = self._worker_for_previous_response(payload)
+        async with self._raw_worker_lease(
+            payload,
+            worker_index=worker_index,
+            operation="responses.create",
+        ) as worker:
+            self._response_workers[response_id] = worker.index
+            response = await worker.request_json("/v1/responses", payload)
+            returned_id = response.get("id")
+            if isinstance(returned_id, str):
+                self._response_workers[returned_id] = worker.index
+                response_id = returned_id
+            if payload.get("background") is True and response.get("status") in {"queued", "in_progress"}:
+                self._track_background(response_id, worker)
+            return response
+
+    async def create_response_stream(self, payload: Dict[str, Any]) -> AsyncIterator[Dict[str, Any]]:
+        self._validate_tool_support(payload)
+        response_id = self._prepare_response_id(payload)
+        worker_index = self._worker_for_previous_response(payload)
+        async with self._raw_worker_lease(
+            payload,
+            worker_index=worker_index,
+            operation="responses.stream",
+        ) as worker:
+            self._response_workers[response_id] = worker.index
+            async for event in worker.stream_json("/v1/responses", payload):
+                response = event.get("response")
+                returned_id = response.get("id") if isinstance(response, dict) else None
+                if isinstance(returned_id, str):
+                    self._response_workers[returned_id] = worker.index
+                yield event
+
+    async def retrieve_response(self, response_id: str) -> Dict[str, Any]:
+        worker = self._response_worker(response_id)
+        return await worker.request_json("/v1/responses/%s" % response_id, None, method="GET")
+
+    async def retrieve_response_stream(
+        self,
+        response_id: str,
+        starting_after: Optional[int] = None,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        worker = self._response_worker(response_id)
+        path = "/v1/responses/%s?stream=true" % response_id
+        if starting_after is not None:
+            path += "&starting_after=%s" % starting_after
+        async for event in worker.stream_json(path, None, method="GET"):
+            yield event
+
+    async def cancel_response(self, response_id: str) -> Dict[str, Any]:
+        worker = self._response_worker(response_id)
+        response = await worker.request_json("/v1/responses/%s/cancel" % response_id, {})
+        if response.get("status") in {"completed", "failed", "cancelled", "incomplete"}:
+            task = self._background_tasks.pop(response_id, None)
+            if task is not None:
+                task.cancel()
+            if not self._background_tasks:
+                self._background_idle.set()
+        return response
+
+    async def wait_for_background(self) -> None:
+        await self._background_idle.wait()
+
+    def _track_background(self, response_id: str, worker: VLLMWorker) -> None:
+        if response_id in self._background_tasks:
+            return
+        self._background_idle.clear()
+        task = asyncio.create_task(self._monitor_background(response_id, worker))
+        self._background_tasks[response_id] = task
+
+    async def _monitor_background(self, response_id: str, worker: VLLMWorker) -> None:
+        try:
+            while not self._stopping:
+                await asyncio.sleep(0.5)
+                response = await worker.request_json(
+                    "/v1/responses/%s" % response_id,
+                    None,
+                    method="GET",
+                )
+                if response.get("status") in {"completed", "failed", "cancelled", "incomplete"}:
+                    return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("Background response monitor failed for %s: %s", response_id, exc)
+        finally:
+            self._background_tasks.pop(response_id, None)
+            if not self._background_tasks:
+                self._background_idle.set()
+
+    def _validate_tool_support(self, payload: Dict[str, Any]) -> None:
+        if payload.get("tools") and self.model_id not in self._settings.vllm_tool_call_parsers:
+            raise UpstreamAPIError(
+                400,
+                {
+                    "error": {
+                        "message": "Model '%s' has no configured vLLM tool-call parser" % self.model_id,
+                        "type": "invalid_request_error",
+                    }
+                },
+            )
+
+    def _prepare_response_id(self, payload: Dict[str, Any]) -> str:
+        request_id = payload.get("request_id")
+        if not isinstance(request_id, str) or not request_id:
+            request_id = "resp_" + uuid.uuid4().hex
+            payload["request_id"] = request_id
+        return request_id
+
+    def _worker_for_previous_response(self, payload: Dict[str, Any]) -> Optional[int]:
+        previous = payload.get("previous_response_id")
+        if not isinstance(previous, str):
+            return None
+        worker_index = self._response_workers.get(previous)
+        if worker_index is None:
+            raise NotFoundError("Response with id '%s' not found" % previous)
+        return worker_index
+
+    def _response_worker(self, response_id: str) -> VLLMWorker:
+        worker_index = self._response_workers.get(response_id)
+        if worker_index is None or worker_index >= len(self.workers):
+            raise NotFoundError("Response with id '%s' not found" % response_id)
+        worker = self.workers[worker_index]
+        if not worker.healthy or worker.exited():
+            self._response_workers.pop(response_id, None)
+            raise NotFoundError("Response with id '%s' is no longer available" % response_id)
+        return worker
+
+    @asynccontextmanager
+    async def _raw_worker_lease(
+        self,
+        payload: Dict[str, Any],
+        *,
+        worker_index: Optional[int] = None,
+        operation: str = "inference",
+    ):
+        cost = max(1, len(json.dumps(payload, ensure_ascii=False)) // 4)
+        async with self._selection_lock:
+            healthy = [worker for worker in self.workers if worker.healthy and not worker.exited()]
+            if not healthy:
+                raise NotReadyError("No healthy vLLM workers are available")
+            if worker_index is None:
+                worker = min(healthy, key=lambda item: (item.outstanding_tokens, item.index))
+            else:
+                worker = next((item for item in healthy if item.index == worker_index), None)
+                if worker is None:
+                    raise NotFoundError("The worker holding this response is no longer available")
+            worker.outstanding_tokens += cost
+            logger.info(
+                "Dispatching %s for model %s to worker %s (estimated_tokens=%s outstanding_tokens=%s)",
+                operation,
+                self.model_id,
+                worker.index,
+                cost,
+                worker.outstanding_tokens,
+            )
+        try:
+            yield worker
+        finally:
+            async with self._selection_lock:
+                worker.outstanding_tokens = max(0, worker.outstanding_tokens - cost)
+            logger.info(
+                "Completed %s for model %s on worker %s (outstanding_tokens=%s)",
+                operation,
+                self.model_id,
+                worker.index,
+                worker.outstanding_tokens,
+            )
 
     async def _generate(self, request: InferenceRequest, *, chat: bool) -> InferenceResult:
         chat = chat or self._completion_uses_chat(request)
@@ -441,6 +674,11 @@ class VLLMPoolBackend(ModelBackend):
                 worker.restart_attempts += 1
                 await asyncio.sleep(2 ** (worker.restart_attempts - 1))
                 try:
+                    self._response_workers = {
+                        response_id: owner
+                        for response_id, owner in self._response_workers.items()
+                        if owner != worker.index
+                    }
                     await worker.stop(close_client=False)
                     await worker.start()
                     logger.info("Restarted vLLM worker %s", worker.index)

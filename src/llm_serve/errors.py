@@ -74,3 +74,18 @@ class UpstreamTimeoutError(ServiceError):
 class UpstreamRuntimeError(ServiceError):
     status_code = 502
     error_type = "upstream_error"
+
+
+class UpstreamAPIError(ServiceError):
+    def __init__(self, status_code: int, payload: Dict[str, Any]) -> None:
+        error = payload.get("error") if isinstance(payload, dict) else None
+        message = error.get("message") if isinstance(error, dict) else None
+        super().__init__(
+            message or "Upstream API request failed",
+            status_code=status_code,
+            error_type=error.get("type") if isinstance(error, dict) else None,
+        )
+        self.payload = payload
+
+    def to_openai_error(self) -> Dict[str, Any]:
+        return self.payload

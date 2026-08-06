@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 from typing import Dict, Iterable, List, Union
 
@@ -27,5 +28,11 @@ def estimate_messages_tokens(messages: Iterable[dict]) -> int:
     for message in messages:
         total += estimate_text_tokens(message.get("role", ""))
         total += estimate_text_tokens(_extract_content_text(message.get("content", "")))
+        if message.get("tool_calls"):
+            total += estimate_text_tokens(json.dumps(message["tool_calls"], ensure_ascii=False))
         total += 4
     return total
+
+
+def estimate_tools_tokens(tools: Iterable[dict]) -> int:
+    return estimate_text_tokens(json.dumps(list(tools), ensure_ascii=False))

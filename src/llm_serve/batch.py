@@ -367,6 +367,8 @@ class BatchManager:
             raise BadRequestError("Batch requests do not support stream=true")
 
         openai_request = OpenAIChatRequest.model_validate(parsed.body)
+        if openai_request.tools:
+            raise BadRequestError("Batch requests do not support tool calling")
         model_id = self.runtime.resolve_model(openai_request.model, openai_request.reasoning_effort)
         return _PreparedBatchItem(
             custom_id=parsed.custom_id,

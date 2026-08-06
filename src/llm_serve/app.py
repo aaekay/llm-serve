@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -31,10 +33,16 @@ from llm_serve.types import InferenceRequest, InferenceResult, LoadStatus
 from .runtime.manager import RuntimeManager
 
 
-def create_app(settings: Optional[Settings] = None) -> FastAPI:
+logger = logging.getLogger(__name__)
+
+
+def create_app(
+    settings: Optional[Settings] = None,
+    runtime_manager: Optional[RuntimeManager] = None,
+) -> FastAPI:
     settings = settings or Settings.load()
     storage = StorageManager(settings.storage_root)
-    runtime = RuntimeManager(settings)
+    runtime = runtime_manager or RuntimeManager(settings)
     batch_manager = BatchManager(storage, runtime)
 
     @asynccontextmanager
@@ -52,6 +60,22 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     app.state.storage = storage
     app.state.runtime = runtime
     app.state.batch_manager = batch_manager
+
+    @app.middleware("http")
+    async def request_observability(request: Request, call_next):
+        request_id = request.headers.get("x-request-id") or "req_" + uuid.uuid4().hex
+        request.state.request_id = request_id
+        started = time.monotonic()
+        logger.info("Request %s started: %s %s", request_id, request.method, request.url.path)
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        logger.info(
+            "Request %s completed: status=%s elapsed=%.3fs",
+            request_id,
+            response.status_code,
+            time.monotonic() - started,
+        )
+        return response
 
     @app.exception_handler(ServiceError)
     async def service_error_handler(request: Request, exc: ServiceError):
@@ -99,11 +123,25 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         model_id = runtime.resolve_model(payload.model, payload.reasoning_effort)
         request_model = build_openai_chat_request(payload, model_id, settings)
 
-        load_status = runtime.check_readiness(model_id)
-        if not load_status.ready:
-            if load_status.state == "conflict":
-                raise ConflictError("Runtime is switching models", extra={"current_model": load_status.current_model})
-            return _load_pending_json_response(load_status, _openai_load_response(load_status))
+        await runtime.ensure_loaded(model_id)
+
+        if settings.inference_backend == "vllm":
+            upstream_payload = payload.upstream_payload(model_id, settings.max_output_tokens)
+            upstream_payload.setdefault("temperature", settings.default_temperature)
+            upstream_payload.setdefault("top_p", settings.default_top_p)
+            if payload.reasoning_effort is not None:
+                template_kwargs = dict(upstream_payload.get("chat_template_kwargs") or {})
+                template_kwargs["enable_thinking"] = settings.enable_thinking
+                upstream_payload["chat_template_kwargs"] = template_kwargs
+            if payload.stream:
+                return StreamingResponse(
+                    _openai_proxy_stream(runtime, model_id, upstream_payload),
+                    media_type="text/event-stream",
+                )
+            return JSONResponse(content=await runtime.openai_chat(model_id, upstream_payload))
+
+        if payload.tools:
+            raise BadRequestError("OpenAI tool calling currently requires INFERENCE_BACKEND=vllm")
 
         if payload.stream:
             stream = _openai_stream(runtime, request_model)
@@ -111,6 +149,45 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
 
         result = await runtime.run_foreground(request_model)
         return _openai_completion_response(result, payload.include_reasoning)
+
+    @app.post("/v1/responses")
+    async def create_response(request: Request):
+        _require_vllm(settings)
+        payload = await _json_object(request)
+        model_id = runtime.resolve_model(payload.get("model"))
+        payload["model"] = model_id
+        requested_max = payload.get("max_output_tokens", settings.max_output_tokens)
+        if not isinstance(requested_max, int) or isinstance(requested_max, bool) or requested_max < 1:
+            raise BadRequestError("max_output_tokens must be a positive integer")
+        payload["max_output_tokens"] = min(requested_max, settings.max_output_tokens)
+        _validate_raw_input(payload, settings.max_input_tokens)
+        await runtime.ensure_loaded(model_id)
+        if payload.get("stream") is True:
+            return StreamingResponse(
+                _responses_proxy_stream(runtime, model_id, payload),
+                media_type="text/event-stream",
+            )
+        return JSONResponse(content=await runtime.create_response(model_id, payload))
+
+    @app.get("/v1/responses/{response_id}")
+    async def retrieve_response(response_id: str, request: Request):
+        _require_vllm(settings)
+        if request.query_params.get("stream", "false").lower() == "true":
+            raw_start = request.query_params.get("starting_after")
+            try:
+                starting_after = int(raw_start) if raw_start is not None else None
+            except ValueError as exc:
+                raise BadRequestError("starting_after must be an integer") from exc
+            return StreamingResponse(
+                _responses_retrieve_stream(runtime, response_id, starting_after),
+                media_type="text/event-stream",
+            )
+        return JSONResponse(content=await runtime.retrieve_response(response_id))
+
+    @app.post("/v1/responses/{response_id}/cancel")
+    async def cancel_response(response_id: str):
+        _require_vllm(settings)
+        return JSONResponse(content=await runtime.cancel_response(response_id))
 
     @app.post("/v1/files")
     async def create_file(purpose: str = Form(...), file: UploadFile = File(...)):
@@ -274,6 +351,58 @@ async def _openai_stream(runtime: RuntimeManager, request_model: InferenceReques
     }
     yield "data: %s\n\n" % json.dumps(final_payload)
     yield "data: [DONE]\n\n"
+
+
+async def _openai_proxy_stream(
+    runtime: RuntimeManager,
+    model_id: str,
+    payload: dict,
+) -> AsyncIterator[str]:
+    async for event in runtime.openai_chat_stream(model_id, payload):
+        yield "data: %s\n\n" % json.dumps(event)
+    yield "data: [DONE]\n\n"
+
+
+async def _responses_proxy_stream(
+    runtime: RuntimeManager,
+    model_id: str,
+    payload: dict,
+) -> AsyncIterator[str]:
+    async for event in runtime.create_response_stream(model_id, payload):
+        yield "data: %s\n\n" % json.dumps(event)
+
+
+async def _responses_retrieve_stream(
+    runtime: RuntimeManager,
+    response_id: str,
+    starting_after: Optional[int],
+) -> AsyncIterator[str]:
+    async for event in runtime.retrieve_response_stream(response_id, starting_after):
+        yield "data: %s\n\n" % json.dumps(event)
+
+
+async def _json_object(request: Request) -> dict:
+    try:
+        payload = await request.json()
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise BadRequestError("Request body must be valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise BadRequestError("Request body must be a JSON object")
+    return payload
+
+
+def _validate_raw_input(payload: dict, max_input_tokens: int) -> None:
+    estimated_tokens = max(1, len(json.dumps(payload, ensure_ascii=False)) // 4)
+    if estimated_tokens > max_input_tokens:
+        raise BadRequestError(
+            "Request too long: estimated %s tokens, max is %s"
+            % (estimated_tokens, max_input_tokens)
+        )
+
+
+def _require_vllm(settings: Settings) -> None:
+    if settings.inference_backend != "vllm":
+        raise BadRequestError("The Responses API requires INFERENCE_BACKEND=vllm")
 
 
 def _ollama_chat_response(result: InferenceResult, include_reasoning: bool):
