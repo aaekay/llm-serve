@@ -30,6 +30,7 @@ pip-wheel-metadata/
 .env
 .env.*
 !.env.example
+!.env.example_*
 
 # Runtime data and logs
 data/runtime/
