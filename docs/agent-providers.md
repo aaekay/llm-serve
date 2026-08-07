@@ -24,6 +24,18 @@ The first startup downloads all Hugging Face and vLLM files beneath `models/`.
 The 64K preset intentionally fails during startup if the selected GPUs cannot
 provide the requested context instead of advertising a false capability.
 
+If startup reports `No such file or directory: 'ninja'`, refresh the runtime
+environment and restart:
+
+```bash
+uv sync --extra runtime --extra dev
+./run-server.sh
+```
+
+Ninja is installed into `.venv/bin/`, and the launcher adds that directory to
+the worker `PATH` so FlashInfer can compile its sampling kernels during vLLM
+startup.
+
 ## Hermes
 
 Run `hermes model`, select a custom/self-hosted endpoint, and enter:

@@ -51,14 +51,27 @@ def _unused_loopback_port() -> int:
 
 
 def _vllm_executable() -> str:
-    executable = shutil.which("vllm")
-    if executable:
-        return executable
     adjacent = Path(sys.executable).with_name("vllm")
     if adjacent.exists():
         return str(adjacent)
+    executable = shutil.which("vllm")
+    if executable:
+        return executable
     raise NotReadyError(
         "The vLLM executable is not installed. Install runtime dependencies with 'uv sync --extra runtime'."
+    )
+
+
+def _ninja_executable() -> str:
+    adjacent = Path(sys.executable).with_name("ninja")
+    if adjacent.exists():
+        return str(adjacent)
+    executable = shutil.which("ninja")
+    if executable:
+        return executable
+    raise NotReadyError(
+        "The Ninja build tool required by FlashInfer is not installed. "
+        "Install runtime dependencies with 'uv sync --extra runtime'."
     )
 
 
@@ -144,7 +157,12 @@ class VLLMWorker:
         return command
 
     async def start(self) -> None:
+        ninja_executable = _ninja_executable()
         env = os.environ.copy()
+        runtime_bin_dir = str(Path(ninja_executable).parent)
+        env["PATH"] = os.pathsep.join(
+            part for part in (runtime_bin_dir, env.get("PATH", "")) if part
+        )
         env.update(
             {
                 "CUDA_VISIBLE_DEVICES": ",".join(str(index) for index in self.gpu_indices),
@@ -172,6 +190,7 @@ class VLLMWorker:
         else:
             env["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
         self.settings.model_cache_dir.mkdir(parents=True, exist_ok=True)
+        logger.info("Using Ninja build tool at %s", ninja_executable)
         self.process = await self._process_factory(
             *self.command(),
             env=env,

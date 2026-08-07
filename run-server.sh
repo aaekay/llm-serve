@@ -17,8 +17,11 @@ SERVER_PGID=""
 LAUNCH_CMD=()
 
 if [[ -x "$ROOT_DIR/.venv/bin/python" ]]; then
+  export PATH="$ROOT_DIR/.venv/bin:$PATH"
+  echo "[llm-serve] Using uv environment: $ROOT_DIR/.venv"
   LAUNCH_CMD=("$ROOT_DIR/.venv/bin/python" "-m" "llm_serve")
 else
+  echo "[llm-serve] No .venv found; launching through uv run"
   LAUNCH_CMD=("uv" "run" "llm-serve")
 fi
 

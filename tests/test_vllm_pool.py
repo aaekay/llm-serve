@@ -75,6 +75,7 @@ def test_worker_command_enables_model_specific_agent_parsers(tmp_path, monkeypat
         VLLM_RESPONSES_STORE_ENABLED="true",
     )
     monkeypatch.setattr(vllm_pool, "_vllm_executable", lambda: "/opt/bin/vllm")
+    monkeypatch.setattr(vllm_pool, "_ninja_executable", lambda: "/opt/ninja/bin/ninja")
     monkeypatch.setattr(vllm_pool, "_unused_loopback_port", lambda: 18000)
     worker = VLLMWorker(0, model, [0], 1, settings, optimized_engine=True)
 
@@ -341,9 +342,23 @@ def test_worker_passes_runtime_and_cache_environment(tmp_path, monkeypatch):
     assert captured["env"]["TRANSFORMERS_CACHE"] == str(settings.transformers_cache)
     assert captured["env"]["VLLM_USE_V1"] == "1"
     assert captured["env"]["VLLM_SKIP_GDN_WARMUP"] == "1"
+    assert captured["env"]["PATH"].split(":", 1)[0] == "/opt/ninja/bin"
     assert captured["env"]["HF_HUB_DISABLE_PROGRESS_BARS"] == "0"
     assert captured["env"]["HF_HUB_VERBOSITY"] == "info"
     assert captured["env"]["PYTHONUNBUFFERED"] == "1"
     assert "TQDM_DISABLE" not in captured["env"]
     assert captured["stdout"] is None
     assert captured["stderr"] is None
+
+
+def test_ninja_preflight_has_actionable_error(monkeypatch):
+    monkeypatch.setattr(vllm_pool.sys, "executable", "/missing/venv/bin/python")
+    monkeypatch.setattr(vllm_pool.shutil, "which", lambda name: None)
+
+    try:
+        vllm_pool._ninja_executable()
+    except Exception as exc:
+        assert "Ninja build tool" in str(exc)
+        assert "uv sync --extra runtime" in str(exc)
+    else:
+        raise AssertionError("missing Ninja should fail before vLLM workers start")
