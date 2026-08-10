@@ -1,9 +1,10 @@
 # llm-serve
 
 `llm-serve` is a local text-generation gateway with OpenAI-compatible (`/v1/*`)
-and Ollama-compatible (`/api/*`) APIs. It supports mock, upstream Ollama, and
-local vLLM inference, plus disk-backed batch processing. The vLLM path supports
-agent tool calling and the OpenAI Responses API for Hermes, OpenCode, and Pi.
+and Ollama-compatible (`/api/*`) APIs. It supports mock, upstream Ollama,
+upstream llama.cpp, and local vLLM inference, plus disk-backed batch processing.
+The vLLM and llama.cpp paths support agent tool calling; the supervised vLLM
+path also supports the stateful OpenAI Responses API.
 
 ## Start
 
@@ -16,7 +17,7 @@ agent tool calling and the OpenAI Responses API for Hermes, OpenCode, and Pi.
 2. Install with `uv`:
 
    ```bash
-   # Mock or Ollama
+   # Mock, Ollama, or an upstream llama.cpp server
    uv sync --extra dev
 
    # Local vLLM
@@ -35,6 +36,8 @@ The default address is `http://127.0.0.1:11424`.
 
 - `INFERENCE_BACKEND=mock` provides lightweight local development and tests.
 - `INFERENCE_BACKEND=ollama` proxies an existing server at `OLLAMA_BASE_URL`.
+- `INFERENCE_BACKEND=llamacpp` proxies an existing OpenAI-compatible
+  `llama-server` at `LLAMACPP_BASE_URL`.
 - `INFERENCE_BACKEND=vllm` starts supervised local vLLM workers.
 - `VLLM_GPU_MODE=manual|fixed|auto` changes GPU topology selection; every mode
   uses the same worker lifecycle, request path, and cleanup behavior.
@@ -52,6 +55,7 @@ does not expose the complete `llm-serve` API.
 - [Request and startup flow](docs/codeflow.md)
 - [Qwen with vLLM](docs/qwen-vllm.md)
 - [Gemma 4 autotuning](docs/gemma4-autotune.md)
+- [Muse Glimmer 30B on H100 with llama.cpp](docs/muse-glimmer-llamacpp.md)
 - [Batch progress](docs/batch-progress.md)
 - [Version-control policy](docs/version-control.md)
 

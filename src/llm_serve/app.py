@@ -125,13 +125,17 @@ def create_app(
 
         await runtime.ensure_loaded(model_id)
 
-        if settings.inference_backend == "vllm":
+        if settings.inference_backend in {"vllm", "llamacpp"}:
             upstream_payload = payload.upstream_payload(model_id, settings.max_output_tokens)
             upstream_payload.setdefault("temperature", settings.default_temperature)
             upstream_payload.setdefault("top_p", settings.default_top_p)
-            if payload.reasoning_effort is not None:
+            if settings.inference_backend == "vllm" and payload.reasoning_effort is not None:
                 template_kwargs = dict(upstream_payload.get("chat_template_kwargs") or {})
                 template_kwargs["enable_thinking"] = settings.enable_thinking
+                upstream_payload["chat_template_kwargs"] = template_kwargs
+            if settings.inference_backend == "llamacpp" and payload.reasoning_effort is not None:
+                template_kwargs = dict(upstream_payload.get("chat_template_kwargs") or {})
+                template_kwargs["reasoning_strength"] = payload.reasoning_effort
                 upstream_payload["chat_template_kwargs"] = template_kwargs
             if payload.stream:
                 return StreamingResponse(
@@ -141,7 +145,10 @@ def create_app(
             return JSONResponse(content=await runtime.openai_chat(model_id, upstream_payload))
 
         if payload.tools:
-            raise BadRequestError("OpenAI tool calling currently requires INFERENCE_BACKEND=vllm")
+            raise BadRequestError(
+                "OpenAI tool calling currently requires "
+                "INFERENCE_BACKEND=vllm or INFERENCE_BACKEND=llamacpp"
+            )
 
         if payload.stream:
             stream = _openai_stream(runtime, request_model)

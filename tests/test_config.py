@@ -228,6 +228,27 @@ def test_settings_accepts_ollama_backend(tmp_path):
     assert settings.ollama_base_url == "http://ollama.local:11434"
 
 
+def test_settings_accepts_llamacpp_backend_and_default_alias(tmp_path):
+    settings = Settings.load(
+        base_dir=tmp_path,
+        environ={
+            "DEFAULT_MODEL_ID": "fallback",
+            "LLAMACPP_DEFAULT_MODEL_ID": "muse-local",
+            "MODEL_ALLOWLIST": "fallback,muse-local",
+            "REASONING_MODEL_ALLOWLIST": "muse-local",
+            "INFERENCE_BACKEND": "llamacpp",
+            "LLAMACPP_BASE_URL": "http://llama.local:8080/v1/",
+            "LLAMACPP_API_KEY": "secret",
+        },
+    )
+
+    assert settings.inference_backend == "llamacpp"
+    assert settings.effective_default_model_id == "muse-local"
+    assert settings.effective_default_model_env_var == "LLAMACPP_DEFAULT_MODEL_ID"
+    assert settings.llamacpp_base_url == "http://llama.local:8080/v1"
+    assert settings.llamacpp_api_key == "secret"
+
+
 def test_settings_parses_enable_thinking(tmp_path):
     off = Settings.load(
         base_dir=tmp_path,

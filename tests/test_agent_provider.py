@@ -149,6 +149,26 @@ def _agent_app(tmp_path):
     return create_app(settings, runtime_manager=runtime), backend
 
 
+def _llamacpp_agent_app(tmp_path):
+    model = "meta-models/Muse-Glimmer-30B-GGUF"
+    settings = make_settings(
+        tmp_path,
+        INFERENCE_BACKEND="llamacpp",
+        DEFAULT_MODEL_ID=model,
+        LLAMACPP_DEFAULT_MODEL_ID=model,
+        MODEL_ALLOWLIST=model,
+        REASONING_MODEL_ALLOWLIST=model,
+        STARTUP_SELF_TEST_ENABLED="false",
+    )
+    backend = AgentBackend(model)
+
+    async def backend_factory(_model_id):
+        return backend
+
+    runtime = RuntimeManager(settings, backend_factory=backend_factory)
+    return create_app(settings, runtime_manager=runtime), backend
+
+
 def _tool():
     return {
         "type": "function",
@@ -204,6 +224,27 @@ def test_vllm_chat_stream_preserves_tool_argument_deltas(tmp_path):
     assert '"finish_reason": "tool_calls"' in body
     assert '"arguments": "{\\"path\\":"' in body
     assert "data: [DONE]" in body
+
+
+def test_llamacpp_chat_preserves_tools_and_maps_muse_reasoning_strength(tmp_path):
+    app, backend = _llamacpp_agent_app(tmp_path)
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "messages": [{"role": "user", "content": "Read the README."}],
+                "tools": [_tool()],
+                "tool_choice": "required",
+                "reasoning_effort": "xhigh",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["finish_reason"] == "tool_calls"
+    assert backend.chat_payloads[0]["tools"][0]["function"]["name"] == "read_file"
+    assert backend.chat_payloads[0]["chat_template_kwargs"] == {
+        "reasoning_strength": "xhigh"
+    }
 
 
 def test_responses_create_stream_retrieve_and_cancel(tmp_path):

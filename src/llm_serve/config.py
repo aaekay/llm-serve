@@ -75,6 +75,7 @@ class Settings:
     default_model_id: str
     vllm_default_model_id: Optional[str]
     ollama_default_model_id: Optional[str]
+    llamacpp_default_model_id: Optional[str]
     model_allowlist: List[str]
     reasoning_model_allowlist: List[str]
     enable_thinking: bool
@@ -140,6 +141,8 @@ class Settings:
     ollama_batch_timeout_retry_multiplier: float
     ollama_batch_retry_output_tokens_multiplier: float
     ollama_batch_retry_max_output_tokens: int
+    llamacpp_base_url: str
+    llamacpp_api_key: Optional[str]
     storage_retention_hours: int
     mock_response_delay_seconds: float
 
@@ -161,6 +164,7 @@ class Settings:
         default_model_id = env_source.get("DEFAULT_MODEL_ID", model_allowlist[0] if model_allowlist else "")
         vllm_default_model_id = _optional_str(env_source.get("VLLM_DEFAULT_MODEL_ID"))
         ollama_default_model_id = _optional_str(env_source.get("OLLAMA_DEFAULT_MODEL_ID"))
+        llamacpp_default_model_id = _optional_str(env_source.get("LLAMACPP_DEFAULT_MODEL_ID"))
         model_cache_dir = _optional_str(env_source.get("MODEL_CACHE_DIR")) or "models"
 
         settings = cls(
@@ -170,6 +174,7 @@ class Settings:
             default_model_id=default_model_id,
             vllm_default_model_id=vllm_default_model_id,
             ollama_default_model_id=ollama_default_model_id,
+            llamacpp_default_model_id=llamacpp_default_model_id,
             model_allowlist=model_allowlist,
             reasoning_model_allowlist=reasoning_allowlist,
             enable_thinking=_parse_bool(
@@ -362,6 +367,10 @@ class Settings:
                     str(int(env_source.get("MAX_OUTPUT_TOKENS", "1024")) * 2),
                 )
             ),
+            llamacpp_base_url=env_source.get(
+                "LLAMACPP_BASE_URL", "http://127.0.0.1:8080/v1"
+            ).rstrip("/"),
+            llamacpp_api_key=_optional_str(env_source.get("LLAMACPP_API_KEY")),
             storage_retention_hours=int(env_source.get("STORAGE_RETENTION_HOURS", "720")),
             mock_response_delay_seconds=float(env_source.get("MOCK_RESPONSE_DELAY_SECONDS", "0.0")),
         )
@@ -392,6 +401,8 @@ class Settings:
             return self.vllm_default_model_id
         if self.inference_backend == "ollama" and self.ollama_default_model_id:
             return self.ollama_default_model_id
+        if self.inference_backend == "llamacpp" and self.llamacpp_default_model_id:
+            return self.llamacpp_default_model_id
         return self.default_model_id
 
     @property
@@ -400,11 +411,14 @@ class Settings:
             return "VLLM_DEFAULT_MODEL_ID"
         if self.inference_backend == "ollama" and self.ollama_default_model_id:
             return "OLLAMA_DEFAULT_MODEL_ID"
+        if self.inference_backend == "llamacpp" and self.llamacpp_default_model_id:
+            return "LLAMACPP_DEFAULT_MODEL_ID"
         return "DEFAULT_MODEL_ID"
 
     def validate(self) -> None:
         self._validate_common()
         self._validate_ollama()
+        self._validate_llamacpp()
         if self.inference_backend == "vllm":
             self._validate_vllm()
 
@@ -415,6 +429,11 @@ class Settings:
             self._validate_allowed_default_model(self.vllm_default_model_id, "VLLM_DEFAULT_MODEL_ID")
         if self.ollama_default_model_id is not None:
             self._validate_allowed_default_model(self.ollama_default_model_id, "OLLAMA_DEFAULT_MODEL_ID")
+        if self.llamacpp_default_model_id is not None:
+            self._validate_allowed_default_model(
+                self.llamacpp_default_model_id,
+                "LLAMACPP_DEFAULT_MODEL_ID",
+            )
         self._validate_allowed_default_model(
             self.effective_default_model_id,
             self.effective_default_model_env_var,
@@ -445,8 +464,10 @@ class Settings:
             raise ValueError("BATCH_QUEUE_LIMIT must be non-negative")
         if self.storage_retention_hours < 0:
             raise ValueError("STORAGE_RETENTION_HOURS must be non-negative (0 disables cleanup)")
-        if self.inference_backend not in {"mock", "vllm", "ollama"}:
-            raise ValueError("INFERENCE_BACKEND must be 'mock', 'vllm', or 'ollama'")
+        if self.inference_backend not in {"mock", "vllm", "ollama", "llamacpp"}:
+            raise ValueError(
+                "INFERENCE_BACKEND must be 'mock', 'vllm', 'ollama', or 'llamacpp'"
+            )
 
     def _validate_ollama(self) -> None:
         if not self.ollama_base_url:
@@ -461,6 +482,10 @@ class Settings:
             raise ValueError("OLLAMA_BATCH_RETRY_OUTPUT_TOKENS_MULTIPLIER must be at least 1")
         if self.ollama_batch_retry_max_output_tokens < 1:
             raise ValueError("OLLAMA_BATCH_RETRY_MAX_OUTPUT_TOKENS must be at least 1")
+
+    def _validate_llamacpp(self) -> None:
+        if not self.llamacpp_base_url:
+            raise ValueError("LLAMACPP_BASE_URL must not be empty")
 
     def _validate_vllm(self) -> None:
         if self.vllm_gpu_mode not in {"manual", "auto", "fixed"}:

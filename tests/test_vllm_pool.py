@@ -302,6 +302,11 @@ def test_worker_passes_runtime_and_cache_environment(tmp_path, monkeypatch):
         VLLM_USE_V1="true",
     )
     monkeypatch.setattr(vllm_pool, "_vllm_executable", lambda: "/opt/bin/vllm")
+    monkeypatch.setattr(
+        vllm_pool,
+        "_ninja_executable",
+        lambda: "/opt/ninja/bin/ninja",
+    )
     monkeypatch.setattr(vllm_pool, "_unused_loopback_port", lambda: 18000)
 
     async def process_factory(*command, **kwargs):

@@ -17,6 +17,7 @@ from llm_serve.types import InferenceRequest, InferenceResult, LoadStatus
 from .base import ModelBackend
 from .autotune import AutoTunedVLLMBackend, FixedTopologyVLLMBackend, ManualVLLMBackend
 from .diagnostics import StartupDiagnostics
+from .llamacpp_backend import LlamaCppModelBackend
 from .mock import MockModelBackend
 from .ollama_backend import OllamaAPIClient, OllamaModelBackend
 
@@ -245,7 +246,7 @@ class RuntimeManager:
 
     async def openai_chat(self, model_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         await self.ensure_loaded(model_id)
-        async with self._vllm_foreground_backend(model_id) as backend:
+        async with self._openai_foreground_backend(model_id) as backend:
             return await backend.openai_chat(payload)
 
     async def openai_chat_stream(
@@ -254,7 +255,7 @@ class RuntimeManager:
         payload: Dict[str, Any],
     ) -> AsyncIterator[Dict[str, Any]]:
         await self.ensure_loaded(model_id)
-        async with self._vllm_foreground_backend(model_id) as backend:
+        async with self._openai_foreground_backend(model_id) as backend:
             stream = self._timeout_stream(
                 backend.openai_chat_stream(payload),
                 self.settings.request_timeout_seconds,
@@ -480,6 +481,8 @@ class RuntimeManager:
                 self.settings,
                 client_factory=self._ollama_client_factory,
             )
+        if self.settings.inference_backend == "llamacpp":
+            return LlamaCppModelBackend(model_id, self.settings)
         if self.settings.vllm_gpu_mode == "auto":
             return AutoTunedVLLMBackend(model_id, self.settings)
         if self.settings.vllm_gpu_mode == "fixed":
@@ -523,7 +526,17 @@ class RuntimeManager:
     @asynccontextmanager
     async def _vllm_foreground_backend(self, model_id: str):
         if self.settings.inference_backend != "vllm":
-            raise BadRequestError("Agent-compatible OpenAI proxying requires INFERENCE_BACKEND=vllm")
+            raise BadRequestError("This endpoint requires INFERENCE_BACKEND=vllm")
+        async with self._openai_foreground_backend(model_id) as backend:
+            yield backend
+
+    @asynccontextmanager
+    async def _openai_foreground_backend(self, model_id: str):
+        if self.settings.inference_backend not in {"vllm", "llamacpp"}:
+            raise BadRequestError(
+                "Agent-compatible OpenAI proxying requires "
+                "INFERENCE_BACKEND=vllm or INFERENCE_BACKEND=llamacpp"
+            )
         async with self._pending_lock:
             limit = self._foreground_capacity + self.settings.foreground_queue_limit
             if self._foreground_pending >= limit:

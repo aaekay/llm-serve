@@ -52,7 +52,7 @@ class OpenAIChatRequest(BaseModel):
     top_p: Optional[float] = Field(default=None, gt=0, le=1)
     max_tokens: Optional[int] = Field(default=None, ge=1)
     max_completion_tokens: Optional[int] = Field(default=None, ge=1)
-    reasoning_effort: Optional[Literal["low", "medium", "high"]] = None
+    reasoning_effort: Optional[Literal["low", "medium", "high", "xhigh"]] = None
     include_reasoning: bool = False
     tools: Optional[List[Dict[str, Any]]] = None
     tool_choice: Optional[Union[Literal["none", "auto", "required"], Dict[str, Any]]] = None

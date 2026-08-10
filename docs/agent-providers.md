@@ -5,6 +5,11 @@ and Pi. The production agent path uses vLLM, `Qwen/Qwen3.5-27B`, a 65,536-token
 context window, an 8,192-token output cap, streaming tool calls, and the Responses
 API.
 
+For the official Muse Glimmer 30B GGUF on an H100, use the opt-in llama.cpp
+backend and its dedicated guide: [Muse Glimmer with llama.cpp](muse-glimmer-llamacpp.md).
+That path supports OpenAI Chat Completions and tool calls while leaving the
+existing vLLM presets unchanged.
+
 ## Start and verify
 
 ```bash
