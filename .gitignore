@@ -47,3 +47,6 @@ models/
 ## documents unnecessary 
 Goal.md
 AGENTS.md
+
+# Batch inputs/outputs (may contain PHI): never commit
+batch_io/

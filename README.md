@@ -55,6 +55,12 @@ sends thousands of independent requests and does its own load balancing. The
 gateway (`run-server.sh`) is built for interactive use and serialises requests.
 Presets: `gemma4-31b`, `qwen36-35b-a3b-fp8`, `qwen36-35b-a3b`, `qwen36-27b-fp8`.
 
+`run-vllm-batch-file.sh <preset> [prefix]` runs offline batches with `vllm run-batch`
+(no HTTP server, no tunnel): every `batch_io/in/<prefix>*.jsonl` (OpenAI batch format)
+becomes `batch_io/out/<name>.out.jsonl`; finished files are skipped on a re-run.
+`batch_io/` is git-ignored; inputs may contain PHI, so copy them with scp/rsync,
+never git, and delete them after the results are copied back.
+
 ## Documentation
 
 - [API usage](api_usage.md)
