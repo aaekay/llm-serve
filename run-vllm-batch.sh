@@ -54,6 +54,24 @@ else
   exit 1
 fi
 export HF_HOME="$MODEL_CACHE_DIR" HUGGINGFACE_HUB_CACHE="$HUB" HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+
+# Serve the cached snapshot folder directly. Passing the repo id makes huggingface_hub verify the snapshot against the
+# full repo file list and refuse to start offline when non-model files (.gitattributes, README.md) were never downloaded.
+REV="${REVISION:-main}"
+if [[ -f "$HUB/$REPO_DIR/refs/$REV" ]]; then
+  COMMIT="$(tr -d '[:space:]' < "$HUB/$REPO_DIR/refs/$REV")"
+else
+  COMMIT="$(ls -1t "$HUB/$REPO_DIR/snapshots" 2>/dev/null | head -1)"
+fi
+SNAP="$HUB/$REPO_DIR/snapshots/$COMMIT"
+if [[ -z "$COMMIT" || ! -f "$SNAP/config.json" ]]; then
+  echo "No usable snapshot for $MODEL_ID under $HUB/$REPO_DIR/snapshots (need config.json)." >&2
+  exit 1
+fi
+if ! ls "$SNAP"/*.safetensors >/dev/null 2>&1; then
+  echo "Snapshot $SNAP has no *.safetensors weights; the download is incomplete." >&2
+  exit 1
+fi
 export CUDA_VISIBLE_DEVICES="$GPU"
 
 if [[ "$MODEL_ID" == google/gemma-4* ]] && ! command -v nvcc >/dev/null 2>&1 && [[ ! -x "${CUDA_HOME:-/nonexistent}/bin/nvcc" ]]; then
@@ -62,11 +80,11 @@ fi
 
 mkdir -p "$ROOT_DIR/logs"
 LOG="$ROOT_DIR/logs/vllm_batch_${SERVED_NAME}_gpu${GPU}_${PORT}.log"
-echo "[run-vllm-batch] $MODEL_ID as '$SERVED_NAME' on GPU $GPU, http://$HOST:$PORT (hub cache: $HUB), log: $LOG"
+echo "[run-vllm-batch] $MODEL_ID as '$SERVED_NAME' on GPU $GPU, http://$HOST:$PORT (snapshot: $SNAP), log: $LOG"
 
 if [[ -x "$ROOT_DIR/.venv/bin/vllm" ]]; then VLLM=("$ROOT_DIR/.venv/bin/vllm"); else VLLM=(uv run --extra runtime vllm); fi
 
-"${VLLM[@]}" serve "$MODEL_ID" \
+"${VLLM[@]}" serve "$SNAP" \
   --served-model-name "$SERVED_NAME" \
   --host "$HOST" --port "$PORT" \
   --tensor-parallel-size 1 \
