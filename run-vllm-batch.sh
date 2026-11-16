@@ -82,7 +82,16 @@ mkdir -p "$ROOT_DIR/logs"
 LOG="$ROOT_DIR/logs/vllm_batch_${SERVED_NAME}_gpu${GPU}_${PORT}.log"
 echo "[run-vllm-batch] $MODEL_ID as '$SERVED_NAME' on GPU $GPU, http://$HOST:$PORT (snapshot: $SNAP), log: $LOG"
 
-if [[ -x "$ROOT_DIR/.venv/bin/vllm" ]]; then VLLM=("$ROOT_DIR/.venv/bin/vllm"); else VLLM=(uv run --extra runtime vllm); fi
+# Put the venv's bin first on PATH: FlashInfer and torch JIT-compile kernels with `ninja` (a runtime dependency that
+# lives in .venv/bin); calling .venv/bin/vllm directly does not make it visible to their subprocesses.
+if [[ -x "$ROOT_DIR/.venv/bin/vllm" ]]; then
+  export PATH="$ROOT_DIR/.venv/bin:$PATH"; VLLM=("$ROOT_DIR/.venv/bin/vllm")
+else
+  VLLM=(uv run --extra runtime vllm)
+fi
+if ! command -v ninja >/dev/null 2>&1 && [[ "${VLLM[0]}" != uv ]]; then
+  echo "ninja not found in $ROOT_DIR/.venv/bin; run: uv sync --extra runtime" >&2; exit 1
+fi
 
 "${VLLM[@]}" serve "$SNAP" \
   --served-model-name "$SERVED_NAME" \
