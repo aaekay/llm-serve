@@ -48,6 +48,13 @@ The default address is `http://127.0.0.1:11424`.
 `run-qwen35-27b.sh` starts raw `vllm serve` for debugging and benchmarking. It
 does not expose the complete `llm-serve` API.
 
+`run-vllm-batch.sh <preset>` starts raw `vllm serve` on one GPU, tuned for offline
+batch throughput: 64 concurrent sequences, prefix caching, 16k context, offline
+model cache, bound to 127.0.0.1, with Prometheus `/metrics`. Use it when a client
+sends thousands of independent requests and does its own load balancing. The
+gateway (`run-server.sh`) is built for interactive use and serialises requests.
+Presets: `gemma4-31b`, `qwen36-35b-a3b-fp8`, `qwen36-35b-a3b`, `qwen36-27b-fp8`.
+
 ## Documentation
 
 - [API usage](api_usage.md)
