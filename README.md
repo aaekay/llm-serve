@@ -61,6 +61,12 @@ becomes `batch_io/out/<name>.out.jsonl`; finished files are skipped on a re-run.
 `batch_io/` is git-ignored; inputs may contain PHI, so copy them with scp/rsync,
 never git, and delete them after the results are copied back.
 
+`run-batch-jobs.sh` runs a small batch job server on 127.0.0.1 (default port 8000):
+clients `POST /jobs?preset=<preset>&name=<label>` with an OpenAI batch JSONL body,
+poll `GET /jobs/<id>`, download `GET /jobs/<id>/output` and `DELETE /jobs/<id>`.
+Jobs run one at a time through `run-vllm-batch-file.sh`, so the tunnel is only
+needed while uploading and downloading, and the GPU is free between jobs.
+
 ## Documentation
 
 - [API usage](api_usage.md)
