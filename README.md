@@ -53,7 +53,9 @@ batch throughput: 64 concurrent sequences, prefix caching, 16k context, offline
 model cache, bound to 127.0.0.1, with Prometheus `/metrics`. Use it when a client
 sends thousands of independent requests and does its own load balancing. The
 gateway (`run-server.sh`) is built for interactive use and serialises requests.
-Presets: `gemma4-31b`, `qwen36-35b-a3b-fp8`, `qwen36-35b-a3b`, `qwen36-27b-fp8`.
+Presets: `gemma4-31b`, `qwen36-35b-a3b-fp8`, `qwen36-35b-a3b`, `qwen36-27b-fp8`, `qwen38-27b-fp8`.
+Models are served offline from `models/hub` (Hugging Face cache layout). Download a new one once, with internet, e.g.
+`HF_HOME=models uvx --from huggingface-hub hf download Qwen/Qwen3.8-27B-FP8` (about 29 GB).
 
 `run-vllm-batch-file.sh <preset> [prefix]` runs offline batches with `vllm run-batch`
 (no HTTP server, no tunnel): every `batch_io/in/<prefix>*.jsonl` (OpenAI batch format)

@@ -8,7 +8,8 @@ case "$PRESET" in
   qwen36-35b-a3b-fp8)  MODEL_ID="Qwen/Qwen3.6-35B-A3B-FP8" ;;
   qwen36-35b-a3b)      MODEL_ID="Qwen/Qwen3.6-35B-A3B" ;;
   qwen36-27b-fp8)      MODEL_ID="Qwen/Qwen3.6-27B-FP8" ;;
-  "")                  echo "usage: $(basename "$0") <gemma4-31b|qwen36-35b-a3b-fp8|qwen36-35b-a3b|qwen36-27b-fp8>  (or MODEL_ID=org/name $(basename "$0") custom)" >&2; exit 2 ;;
+  qwen38-27b-fp8)      MODEL_ID="Qwen/Qwen3.8-27B-FP8" ;;
+  "")                  echo "usage: $(basename "$0") <gemma4-31b|qwen36-35b-a3b-fp8|qwen36-35b-a3b|qwen36-27b-fp8|qwen38-27b-fp8>  (or MODEL_ID=org/name $(basename "$0") custom)" >&2; exit 2 ;;
   custom)              MODEL_ID="${MODEL_ID:?set MODEL_ID=org/name}" ;;
   *)                   echo "unknown preset: $PRESET" >&2; exit 2 ;;
 esac

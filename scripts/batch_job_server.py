@@ -24,7 +24,7 @@ from urllib.parse import urlparse, parse_qs
 
 ROOT = Path(__file__).resolve().parents[1]
 JOBS = ROOT / "batch_io" / "jobs"
-PRESETS = {"gemma4-31b", "qwen36-35b-a3b-fp8", "qwen36-35b-a3b", "qwen36-27b-fp8"}
+PRESETS = {"gemma4-31b", "qwen36-35b-a3b-fp8", "qwen36-35b-a3b", "qwen36-27b-fp8", "qwen38-27b-fp8"}
 MAX_UPLOAD = int(os.getenv("BATCH_MAX_UPLOAD_MB", "512")) * 1024 * 1024
 GPU = os.getenv("GPU", "0")
 _lock = threading.Lock()
